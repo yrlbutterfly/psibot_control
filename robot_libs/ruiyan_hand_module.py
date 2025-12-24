@@ -3,21 +3,18 @@ import numpy as np
 import sys
 import os
 
-# 确保能导入 haptic_hand_control 目录下的模块
+# 确保能导入 robot_libs 包
 current_dir = os.path.dirname(os.path.abspath(__file__))
-haptic_control_dir = os.path.join(current_dir, 'haptic_hand_control')
-if haptic_control_dir not in sys.path:
-    sys.path.append(haptic_control_dir)
+robot_libs_parent = os.path.dirname(current_dir)  # Get parent directory of robot_libs
+if robot_libs_parent not in sys.path:
+    sys.path.insert(0, robot_libs_parent)
 
 try:
-    from haptic_hand_control.ry_hand_controller import RuiyanHandController, RuiyanInstructionType
-    from haptic_hand_control.ry_hand_interface import SerialInterface
-except ImportError:
-    try:
-        from ry_hand_controller import RuiyanHandController, RuiyanInstructionType
-        from ry_hand_interface import SerialInterface
-    except ImportError as e:
-        print(f"Warning: Could not import RyHand Serial modules: {e}")
+    from robot_libs.haptic_hand_control.ry_hand_controller import RuiyanHandController, RuiyanInstructionType
+    from robot_libs.haptic_hand_control.ry_hand_interface import SerialInterface
+except ImportError as e:
+    print(f"Error: Could not import RyHand Serial modules: {e}")
+    raise RuntimeError(f"Failed to import required RyHand modules. Please check your installation. Error: {e}")
 
 class Hand:
     def __init__(self, port='/dev/ttyUSB1', node_id=2):
@@ -58,8 +55,11 @@ class Hand:
         
         # 初始化内部状态
         # 默认速度和电流限制 (参考 node 代码)
-        self.controller.velocity_list = [3000] * 6
-        self.controller.current_list = [1000] * 6
+        # Reduced speed for safer, slower movement (original: 3000)
+        self.controller.velocity_list = [1500] * 6
+        # Motor 1 (Thumb Rotation) may need lower current to avoid overcurrent protection
+        # Adjust if needed: [motor1, motor2, motor3, motor4, motor5, motor6]
+        self.controller.current_list = [800, 1000, 1000, 1000, 1000, 1000]  # Reduced current for motor 1
         self.controller.position_list = [0] * 6 # 初始位置 0
         
         self.last_read_angles = [0.0] * 6
@@ -103,8 +103,10 @@ class Hand:
             ruiyan_angles[5] = aoyi_angles[4] # Motor 6: Pinky    (Index 4 in Aoyi)
             
             # 将 0-1 映射到 0-4096 (瑞依手的位置范围)
-            # 注意：需根据实际手的手性或者具体标定确认方向，这里假设 0-4096 正比于 0-1
-            position_cmds = [int(angle * 4096) for angle in ruiyan_angles]
+            # Ruiyan Hand hardware: 0=open, 4096=closed
+            # User input: 0=closed, 1=open
+            # So we need to invert: user_input=1.0 -> hardware=0, user_input=0.0 -> hardware=4096
+            position_cmds = [int((1.0 - angle) * 4096) for angle in ruiyan_angles]
             
             # 更新控制器目标
             self.controller.position_list = position_cmds
@@ -133,7 +135,10 @@ class Hand:
         
         def get_norm_pos(motor_id):
             if motor_id in status_map and status_map[motor_id].position is not None:
-                return float(status_map[motor_id].position) / 4096.0
+                # Hardware: 0=open, 4096=closed
+                # User expects: 0=closed, 1=open
+                # So invert the reading
+                return 1.0 - (float(status_map[motor_id].position) / 4096.0)
             return 0.0
 
         # Aoyi Order: [Thumb, Index, Middle, Ring, Pinky, ThumbRot]

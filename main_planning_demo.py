@@ -4,12 +4,14 @@ import cv2
 import numpy as np
 import time
 import open3d as o3d
+import torch
 from scipy.spatial.transform import Rotation as R
 
 # 引入你现有的模块
 from robot_libs.realsense_image_module import RealSenseImage, generate_pcd
 from robot_libs.realman_arm_module import ArmControl
-from segment_anything import sam_model_registry, SamPredictor
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 # ---------------------------------------------------------
 # 1. 配置区域
@@ -17,8 +19,7 @@ from segment_anything import sam_model_registry, SamPredictor
 CAMERA_SN = "134222070573"       # 你的相机SN (参考 camera.py)
 ROBOT_IP = "192.168.100.101"     # 你的机械臂IP (参考 control.py, 右臂)
 CALIB_FILE = "calibration_results/camera_calibration_xxxx.npz" # 你的标定文件路径
-SAM_CHECKPOINT = "sam_vit_h_4b8939.pth" # SAM权重路径
-SAM_MODEL_TYPE = "vit_h"
+SAM_CHECKPOINT = "sam2.1_hiera_large.pt" # SAM 2.1权重路径
 
 # ---------------------------------------------------------
 # 2. 辅助类：加载标定结果 (参考 vis_cam_to_base.py)
@@ -125,11 +126,14 @@ def main():
     robot = ArmControl(ip=ROBOT_IP)
     calib = CalibrationHandler(CALIB_FILE)
     
-    # B. 初始化 SAM
-    print("正在加载 SAM 模型...")
-    sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
-    sam.to("cuda") # 如果没显卡改成 "cpu"
-    predictor = SamPredictor(sam)
+    # B. 初始化 SAM 2
+    print("正在加载 SAM 2.1 模型...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"使用设备: {device}")
+    # Use official config path from SAM 2 package
+    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    sam2_model = build_sam2(model_cfg, SAM_CHECKPOINT, device=device)
+    predictor = SAM2ImagePredictor(sam2_model)
     print("模型加载完成")
 
     # C. 移动到拍照姿态 (参考 control.py 里的初始位置)

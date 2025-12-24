@@ -1,10 +1,12 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from segment_anything import sam_model_registry, SamPredictor
+import torch
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 # === 图像分割测试脚本 ===
-# 使用 Segment Anything Model (SAM) 进行交互式图像分割
+# 使用 Segment Anything Model 2 (SAM 2.1) 进行交互式图像分割
 # 流程：加载图像 -> 加载模型 -> 鼠标点击目标 -> 模型生成分割掩码 (Mask)
 
 # 1. 加载图像
@@ -12,16 +14,19 @@ image_path = "image.png"
 image_bgr = cv2.imread(image_path)
 image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-# 2. 加载 SAM 模型
-# 需要下载对应的 checkpoint 文件 (sam_vit_h_4b8939.pth)
-sam_checkpoint = "sam_vit_h_4b8939.pth"
-model_type = "vit_h" # 模型型号
+# 2. 加载 SAM 2.1 模型
+# 需要下载对应的 checkpoint 文件 (sam2.1_hiera_large.pt)
+sam_checkpoint = "sam2.1_hiera_large.pt"
+model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"  # Official config path
 
-sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-sam.to("cpu")  # 使用GPU（如果可用建议改为"cuda"）或 "cpu"
+# Determine device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
-predictor = SamPredictor(sam)
-predictor.set_image(image) # 预处理图像编码
+# Build SAM 2 model - config path is relative to sam2 package
+sam2_model = build_sam2(model_cfg, sam_checkpoint, device=device)
+predictor = SAM2ImagePredictor(sam2_model)
+predictor.set_image(image)  # Preprocess image encoding
 
 # 3. 交互式选择点
 # 弹出一个窗口，用户点击想要分割的物体

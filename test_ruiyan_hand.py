@@ -79,20 +79,25 @@ def test_hand(port_name, hand_type):
 
 def main():
     # 检测系统中的USB设备，或者直接指定
-    # 根据 control.py 中的配置：
-    # Left: /dev/ttyUSB0
-    # Right: /dev/ttyUSB1
+    # 实际设备可能是 ttyACM* 而不是 ttyUSB*
+    # WCH.CN USB Quad Serial 使用 ttyACM0-3
     
     print("请选择要测试的手:")
-    print("1. 左手 (/dev/ttyUSB0)")
-    print("2. 右手 (/dev/ttyUSB1)")
+    print("1. 左手 (/dev/ttyACM0)")
+    print("2. 右手 (/dev/ttyACM1)")
+    print("3. 测试 /dev/ttyACM2")
+    print("4. 测试 /dev/ttyACM3")
     
-    choice = input("请输入选项 (1/2): ").strip()
+    choice = input("请输入选项 (1/2/3/4): ").strip()
     
     if choice == '1':
-        test_hand('/dev/ttyUSB0', 'Left')
+        test_hand('/dev/ttyACM0', 'Left')
     elif choice == '2':
-        test_hand('/dev/ttyUSB1', 'Right')
+        test_hand('/dev/ttyACM1', 'Right')
+    elif choice == '3':
+        test_hand('/dev/ttyACM2', 'ACM2')
+    elif choice == '4':
+        test_hand('/dev/ttyACM3', 'ACM3')
     else:
         print("无效选项")
 
