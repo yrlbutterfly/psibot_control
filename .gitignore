@@ -37,3 +37,4 @@ image.png
 # Logs
 *.log
 sam2_repo/
+sam2.1_hiera_large.pt
