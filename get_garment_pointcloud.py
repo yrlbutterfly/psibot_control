@@ -158,13 +158,66 @@ class GarmentPointCloudExtractor:
         if len(garment_points) > 0:
             print(f"[DEBUG] Point cloud Z range: {garment_points[:, 2].min():.3f} - {garment_points[:, 2].max():.3f} m")
         
-        # Remove any remaining invalid points (depth issues or camera coordinate conversion)
-        # Note: Z-axis is depth, negative Z means points are behind camera
-        valid = np.abs(garment_points[:, 2]) > 0.01  # Remove near-zero depth
+        # Step 1: Remove invalid points (near-zero depth)
+        valid = np.abs(garment_points[:, 2]) > 0.01
         garment_points = garment_points[valid]
         garment_colors = garment_colors[valid]
+        print(f"[DEBUG] After basic filtering: {len(garment_points)} points")
         
-        print(f"[DEBUG] After filtering: {len(garment_points)} points")
+        # Step 2: Remove outliers based on depth clustering
+        # This filters out background/table points that are far from the main garment
+        if len(garment_points) > 100:  # Only if we have enough points
+            depths = np.abs(garment_points[:, 2])
+            
+            # Use median and MAD (robust to outliers)
+            median_depth = np.median(depths)
+            mad = np.median(np.abs(depths - median_depth))
+            
+            print(f"[DEBUG] Depth statistics: median={median_depth:.3f}m, MAD={mad:.3f}m")
+            
+            # Adaptive threshold based on MAD
+            if mad < 0.05:  # Very tight cluster
+                tolerance = 0.3  # Allow ±30cm from median
+            else:
+                tolerance = max(3 * mad, 0.3)  # 3*MAD but at least 30cm
+            
+            # Filter points by depth
+            depth_filter = np.abs(depths - median_depth) <= tolerance
+            filtered_points = garment_points[depth_filter]
+            filtered_colors = garment_colors[depth_filter]
+            
+            num_removed = len(garment_points) - len(filtered_points)
+            if num_removed > 0:
+                print(f"[INFO] Removed {num_removed} depth outliers (tolerance=±{tolerance:.3f}m)")
+                print(f"[INFO] Depth range: {depths.min():.3f}m -> {filtered_points[:, 2].min():.3f}m to")
+                print(f"                    {depths.max():.3f}m -> {filtered_points[:, 2].max():.3f}m")
+                garment_points = filtered_points
+                garment_colors = filtered_colors
+            else:
+                print(f"[INFO] No depth outliers detected (all within ±{tolerance:.3f}m)")
+        
+        print(f"[DEBUG] After outlier filtering: {len(garment_points)} points")
+        
+        # Step 3: Statistical outlier removal (removes isolated points)
+        # This removes scattered points that are far from neighbors
+        if len(garment_points) > 50:
+            temp_pcd = o3d.geometry.PointCloud()
+            temp_pcd.points = o3d.utility.Vector3dVector(garment_points)
+            temp_pcd.colors = o3d.utility.Vector3dVector(garment_colors)
+            
+            # Remove statistical outliers
+            # nb_neighbors: number of neighbors to consider
+            # std_ratio: standard deviation ratio (lower = more aggressive)
+            cl, ind = temp_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+            
+            garment_points = np.asarray(cl.points)
+            garment_colors = np.asarray(cl.colors)
+            
+            num_removed = len(temp_pcd.points) - len(garment_points)
+            if num_removed > 0:
+                print(f"[INFO] Removed {num_removed} spatial outliers (isolated points)")
+        
+        print(f"[DEBUG] Final point count: {len(garment_points)} points")
         
         # Create filtered point cloud
         garment_pcd = o3d.geometry.PointCloud()
@@ -191,8 +244,9 @@ class GarmentPointCloudExtractor:
         
         # Note: Z is negative because of coordinate system transform
         # This is correct for robot base frame alignment
-        print(f"\n[NOTE] Z-axis points backward (negative values are correct)")
-        print(f"       This coordinate system is aligned with robot base frame")
+        print(f"\n[NOTE] Coordinate system after generate_pcd transform:")
+        print(f"       X: right, Y: up (flipped), Z: backward (flipped)")
+        print(f"       Z values are negative (matches T_cam2base calibration)")
         
         # Create visualization copy - flip Z for more intuitive viewing
         pcd_vis = o3d.geometry.PointCloud(pcd)
@@ -203,10 +257,10 @@ class GarmentPointCloudExtractor:
         frame_size = max(0.1, pcd_extent * 0.2)
         coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
         
-        print(f"\n[INFO] Opening visualization window (Z-flipped for better view)...")
+        print(f"\n[INFO] Opening visualization window...")
         print(f"  - Use mouse to rotate/pan/zoom")
         print(f"  - Press 'Q' to close")
-        print(f"  - Red=X, Green=Y, Blue=Z")
+        print(f"  - Coordinate axes: Red=X, Green=Y, Blue=Z")
         
         # Create visualizer with custom settings for better point visibility
         vis = o3d.visualization.Visualizer()

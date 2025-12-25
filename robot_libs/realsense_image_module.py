@@ -94,7 +94,10 @@ def generate_pcd(color_image, depth_image, intrinsics, visualize_flag=False):
         o3d.visualization.draw_geometries([pcd])
 
     # Adjust coordinate system
-    pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+    # NOTE: Coordinate transform commented out to match external calibration data
+    # If calibration was done WITHOUT this transform, keep it commented
+    # If calibration was done WITH this transform, uncomment the line below
+    # pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
     return pcd
 #----------------
 

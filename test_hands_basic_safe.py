@@ -217,33 +217,33 @@ def main():
     
     # Ask which hand(s) to test
     print("请选择要测试的手:")
-    print("1. 左手 (/dev/ttyACM0)")
-    print("2. 右手 (/dev/ttyACM1)")
+    print("1. 右手 (/dev/ttyACM3) - WCH串口")
+    print("2. 左手 (/dev/ttyACM2) - WCH串口 (如果连接)")
     print("3. 双手（依次测试）")
     print()
     
     choice = input("请输入选项 (1/2/3): ").strip()
     
     if choice == '1':
-        print("\n开始测试左手...")
-        test_single_hand('/dev/ttyACM0', '左手')
+        print("\n开始测试右手...")
+        test_single_hand('/dev/ttyACM3', '右手')
         
     elif choice == '2':
-        print("\n开始测试右手...")
-        test_single_hand('/dev/ttyACM1', '右手')
+        print("\n开始测试左手...")
+        test_single_hand('/dev/ttyACM2', '左手')
         
     elif choice == '3':
         print("\n开始测试双手...")
         
-        # Test left hand
-        success_left = test_single_hand('/dev/ttyACM0', '左手')
+        # Test right hand first
+        success_right = test_single_hand('/dev/ttyACM3', '右手')
         
-        if success_left:
+        if success_right:
             print("\n" + "="*60)
-            input("\n左手测试完成。按 Enter 继续测试右手...")
+            input("\n右手测试完成。按 Enter 继续测试左手...")
             
-            # Test right hand
-            test_single_hand('/dev/ttyACM1', '右手')
+            # Test left hand
+            test_single_hand('/dev/ttyACM2', '左手')
         
         print("\n" + "="*60)
         print("✅ 双手测试完成")
