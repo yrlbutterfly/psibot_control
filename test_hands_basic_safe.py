@@ -217,8 +217,8 @@ def main():
     
     # Ask which hand(s) to test
     print("请选择要测试的手:")
-    print("1. 右手 (/dev/ttyACM3) - WCH串口")
-    print("2. 左手 (/dev/ttyACM2) - WCH串口 (如果连接)")
+    print("1. 右手 (/dev/ttyACM3)")
+    print("2. 左手 (/dev/ttyACM5)")
     print("3. 双手（依次测试）")
     print()
     
@@ -230,7 +230,7 @@ def main():
         
     elif choice == '2':
         print("\n开始测试左手...")
-        test_single_hand('/dev/ttyACM2', '左手')
+        test_single_hand('/dev/ttyACM5', '左手')
         
     elif choice == '3':
         print("\n开始测试双手...")
@@ -243,7 +243,7 @@ def main():
             input("\n右手测试完成。按 Enter 继续测试左手...")
             
             # Test left hand
-            test_single_hand('/dev/ttyACM2', '左手')
+            test_single_hand('/dev/ttyACM5', '左手')
         
         print("\n" + "="*60)
         print("✅ 双手测试完成")

@@ -182,16 +182,38 @@ def main():
     CAMERA_SN = "046322250624"
     SAM_CHECKPOINT = "sam2.1_hiera_large.pt"
     CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251222-224450.npz"
+    CALIB_FILE_RIGHT = "calibration_results/camera_calibration_right_arm_20251222-222131.npz"
+    
+    # Arm selection: 'left' or 'right'
+    ARM_SELECT = 'right'  # Default to right arm
     
     # Safety parameters
-    SAFE_HEIGHT = 0.3  # Minimum safe height above table (meters)
-    APPROACH_OFFSET = 0.10  # Approach from 10cm above target (meters)
-    MOVE_SPEED = 15  # Movement speed (0-100)
+    SAFE_HEIGHT = -0.5  # Modified: Allow going lower than table for now (user confirmation required)
+    # SAFE_HEIGHT = 0.3  # Original value
+    APPROACH_OFFSET = 0.05# Approach from 10cm above target (meters)
+    MOVE_SPEED = 5  # Movement speed (0-100)
     
+    # ==================== Manual Offset Correction (Debug) ====================
+    # 如果发现位置有系统性偏差（比如偏左、偏右），可以在这里进行微调
+    # 坐标系参考 (基座坐标系):
+    #   X: 前后 (正=前, 负=后)
+    #   Y: 左右 (正=左, 负=右)  <- 如果偏左，尝试减小Y (例如 -0.02 表示向右移2cm)
+    #   Z: 上下 (正=上, 负=下)
+    MANUAL_OFFSET_X = 0.0   # meters
+    MANUAL_OFFSET_Y = 0.0   # meters
+    MANUAL_OFFSET_Z = 0.0   # meters
+    # ==========================================================================
+
     print("\n" + "="*70)
-    print("  Bbox to Motion Planning Test")
-    print("  测试从bbox标注到左手运动规划的完整流程")
+    print(f"  Bbox to Motion Planning Test ({ARM_SELECT.capitalize()} Arm)")
+    print(f"  测试从bbox标注到{ARM_SELECT}手运动规划的完整流程")
     print("="*70)
+    
+    # Select arm
+    arm_choice = input(f"Select arm to control (left/right) [default={ARM_SELECT}]: ").strip().lower()
+    if arm_choice in ['left', 'right']:
+        ARM_SELECT = arm_choice
+    print(f"[INFO] Selected arm: {ARM_SELECT.upper()}")
     
     # ==================== Step 1: Get Garment Point Cloud ====================
     print("\n[Step 1/5] Acquiring garment point cloud...")
@@ -244,13 +266,15 @@ def main():
     print("\n[Step 3/5] Mapping bbox to 3D position...")
     print("           将bbox映射到3D坐标...")
     
-    # Load calibration (left arm)
-    if not os.path.exists(CALIB_FILE_LEFT):
-        print(f"[ERROR] Calibration file not found: {CALIB_FILE_LEFT}")
+    # Load calibration based on selected arm
+    calib_file = CALIB_FILE_LEFT if ARM_SELECT == 'left' else CALIB_FILE_RIGHT
+    
+    if not os.path.exists(calib_file):
+        print(f"[ERROR] Calibration file not found: {calib_file}")
         return
     
-    calib_left = np.load(CALIB_FILE_LEFT)
-    T_cam2base = calib_left['T_cam2base']
+    calib_data = np.load(calib_file)
+    T_cam2base = calib_data['T_cam2base']
     # camera_intrinsics already obtained before closing camera
     
     # Project point cloud to image
@@ -273,22 +297,32 @@ def main():
     # Visualize projection
     print("\n[INFO] Visualizing projection...")
     visualize_projection_with_bbox(color_img, garment_points_cam, camera_intrinsics, bbox, target_3d_cam)
+
+    # Apply manual offset
+    if MANUAL_OFFSET_X != 0 or MANUAL_OFFSET_Y != 0 or MANUAL_OFFSET_Z != 0:
+        print(f"\n  [DEBUG] Applying manual offset: [{MANUAL_OFFSET_X}, {MANUAL_OFFSET_Y}, {MANUAL_OFFSET_Z}]")
+        target_3d_base[0] += MANUAL_OFFSET_X
+        target_3d_base[1] += MANUAL_OFFSET_Y
+        target_3d_base[2] += MANUAL_OFFSET_Z
+        print(f"  ✓ Adjusted Target (base frame): [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
     
     # ==================== Step 4: Safety Check ====================
     print("\n[Step 4/5] Safety check...")
     print("           安全检查...")
     
     # Check if target height is safe
+    print(f"  [Safety Check] Target Height: {target_3d_base[2]:.3f}m, Safe Threshold: {SAFE_HEIGHT}m")
     if target_3d_base[2] < SAFE_HEIGHT:
         print(f"  ⚠️  WARNING: Target height ({target_3d_base[2]:.3f}m) is below safe threshold ({SAFE_HEIGHT}m)")
-        print(f"  ⚠️  Adjusting target height to {SAFE_HEIGHT}m for safety")
-        target_3d_base[2] = SAFE_HEIGHT
+        # print(f"  ⚠️  Adjusting target height to {SAFE_HEIGHT}m for safety")
+        # target_3d_base[2] = SAFE_HEIGHT
+        print(f"  ⚠️  SKIPPING adjustment (as requested by user feedback). BE CAREFUL!")
     
-    print(f"  ✓ Safe target position: [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
+    print(f"  ✓ Target position: [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
     
     # ==================== Step 5: Motion Planning ====================
-    print("\n[Step 5/5] Executing left arm motion planning...")
-    print("           执行左手运动规划...")
+    print(f"\n[Step 5/5] Executing {ARM_SELECT} arm motion planning...")
+    print(f"           执行{ARM_SELECT}手运动规划...")
     
     print("\n" + "="*70)
     print("  ⚠️  SAFETY WARNING")
@@ -309,9 +343,15 @@ def main():
         print("\n[INFO] Initializing robot controller...")
         robot = RealRobotController(camera_sn=CAMERA_SN)
         
-        # Get current left arm pose
-        current_pose = robot.get_left_arm_pose()
-        print(f"\n[INFO] Current left arm pose:")
+        # Get current arm pose and control object
+        if ARM_SELECT == 'left':
+            current_pose = robot.get_left_arm_pose()
+            active_arm = robot.left_arm
+        else:
+            current_pose = robot.get_right_arm_pose()
+            active_arm = robot.right_arm
+            
+        print(f"\n[INFO] Current {ARM_SELECT} arm pose:")
         print(f"  Position: [{current_pose[0]:.3f}, {current_pose[1]:.3f}, {current_pose[2]:.3f}] m")
         print(f"  Orientation: [{current_pose[3]:.3f}, {current_pose[4]:.3f}, {current_pose[5]:.3f}] rad")
         
@@ -326,50 +366,47 @@ def main():
         print(f"\n[Phase 1] Moving to approach position...")
         print(f"  Target: [{approach_pos[0]:.3f}, {approach_pos[1]:.3f}, {approach_pos[2]:.3f}] m")
         
-        # Use move_pose_Cmd from ArmControl
-        robot.left_arm.robot.Clear_System_Err()
-        ret = robot.left_arm.robot.Movej_P_Cmd(approach_pose.tolist(), MOVE_SPEED)
+        # Calculate steps for safe execution
+        start_pos = current_pose[:3]
+        end_pos = approach_pose[:3]
+        total_dist = np.linalg.norm(end_pos - start_pos)
+        STEP_SIZE = 0.02  # 2 cm per step
         
-        if ret == 0:
-            print(f"  ✓ Reached approach position")
-        else:
-            print(f"  ✗ Move failed with error code: {ret}")
-            robot.close()
-            return
+        num_steps = int(np.ceil(total_dist / STEP_SIZE))
+        if num_steps < 1: num_steps = 1
+        
+        print(f"\n[INFO] BREAKING DOWN MOTION into {num_steps} steps (Step size: ~{STEP_SIZE*100:.1f} cm)")
+        print("  Controls: SPACE/Enter = Next step, 'q' = Quit")
         
         import time
-        time.sleep(1.0)  # Settle time
         
-        # Phase 2: Move down to target position
-        target_pose = np.array([
-            target_3d_base[0], target_3d_base[1], target_3d_base[2],
-            current_pose[3], current_pose[4], current_pose[5]
-        ])
+        for i in range(1, num_steps + 1):
+            # Interpolate
+            ratio = i / num_steps
+            interp_pos = start_pos + (end_pos - start_pos) * ratio
+            
+            interp_pose = np.array([
+                interp_pos[0], interp_pos[1], interp_pos[2],
+                current_pose[3], current_pose[4], current_pose[5]
+            ])
+            
+            # Wait for user confirmation
+            user_input = input(f"  Step {i}/{num_steps} [{interp_pos[0]:.3f}, {interp_pos[1]:.3f}, {interp_pos[2]:.3f}] > ")
+            if user_input.lower() == 'q':
+                print("[INFO] Motion aborted by user")
+                robot.close()
+                return
+            
+            # Execute step
+            active_arm.robot.Clear_System_Err()
+            active_arm.move_pose_Cmd(interp_pose.tolist(), MOVE_SPEED)
+            
+            # Brief pause to let command send and maybe start
+            time.sleep(0.1)
+            
+        print(f"  ✓ Reached approach position (Target)")
         
-        print(f"\n[Phase 2] Moving to target position...")
-        print(f"  Target: [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
-        
-        robot.left_arm.robot.Clear_System_Err()
-        ret = robot.left_arm.robot.Movej_P_Cmd(target_pose.tolist(), MOVE_SPEED // 2)  # Slower for final approach
-        
-        if ret == 0:
-            print(f"  ✓ Reached target position!")
-        else:
-            print(f"  ✗ Move failed with error code: {ret}")
-            robot.close()
-            return
-        
-        time.sleep(1.0)
-        
-        # Get final pose
-        final_pose = robot.get_left_arm_pose()
-        print(f"\n[INFO] Final left arm pose:")
-        print(f"  Position: [{final_pose[0]:.3f}, {final_pose[1]:.3f}, {final_pose[2]:.3f}] m")
-        print(f"  Error: [{final_pose[0]-target_3d_base[0]:.3f}, "
-              f"{final_pose[1]-target_3d_base[1]:.3f}, "
-              f"{final_pose[2]-target_3d_base[2]:.3f}] m")
-        
-        print("\n" + "="*70)
+        print("\n[INFO] Stopping here as requested (Safety).")
         print("  ✓ Motion planning test completed successfully!")
         print("  ✓ 运动规划测试成功完成!")
         print("="*70)

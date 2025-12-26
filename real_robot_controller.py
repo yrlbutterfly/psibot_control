@@ -39,12 +39,21 @@ class RealRobotController:
         
         # Connect to hands (连接灵巧手) - Use correct ports!
         print("\n[2/5] Connecting to hands...")
-        self.left_hand = Hand(port='/dev/ttyACM2')  # Left hand
-        print("  ✓ Left hand connected")
+        try:
+            self.left_hand = Hand(port='/dev/ttyACM5')  # Left hand
+            print("  ✓ Left hand connected")
+        except Exception as e:
+            print(f"  ! Left hand connection failed: {e}")
+            self.left_hand = None
+            
         time.sleep(0.5)  # Wait before connecting second hand
         
-        self.right_hand = Hand(port='/dev/ttyACM3')  # Right hand
-        print("  ✓ Right hand connected")
+        try:
+            self.right_hand = Hand(port='/dev/ttyACM3')  # Right hand
+            print("  ✓ Right hand connected")
+        except Exception as e:
+            print(f"  ! Right hand connection failed: {e}")
+            self.right_hand = None
         time.sleep(0.5)
         
         # Connect to camera (连接相机)
