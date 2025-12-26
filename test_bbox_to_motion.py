@@ -181,8 +181,8 @@ def main():
     # ==================== Configuration ====================
     CAMERA_SN = "046322250624"
     SAM_CHECKPOINT = "sam2.1_hiera_large.pt"
-    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251222-224450.npz"
-    CALIB_FILE_RIGHT = "calibration_results/camera_calibration_right_arm_20251222-222131.npz"
+    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251226-234053.npz"
+    CALIB_FILE_RIGHT = "calibration_results/camera_calibration_right_arm_20251226-234855.npz"
     
     # Arm selection: 'left' or 'right'
     ARM_SELECT = 'right'  # Default to right arm

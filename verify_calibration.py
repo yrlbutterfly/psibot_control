@@ -224,18 +224,18 @@ def main():
     print_header("标定结果验证工具")
     
     print("可用的标定结果:")
-    print("  1. 右臂 (camera_calibration_right_arm_20251222-222131.npz)")
-    print("  2. 左臂 (camera_calibration_left_arm_20251222-224450.npz)")
+    print("  1. 右臂 (camera_calibration_right_arm_20251226-234855.npz)")
+    print("  2. 左臂 (camera_calibration_left_arm_20251226-234053.npz)")
     
     choice = input("\n选择要验证的标定 (1/2): ").strip()
     
     if choice == '1':
-        calib_file = "calibration_results/camera_calibration_right_arm_20251222-222131.npz"
+        calib_file = "calibration_results/camera_calibration_right_arm_20251226-234855.npz"
         camera_sn = "046322250624"
         robot_ip = "192.168.100.101"
         print("\n已选择: 右臂标定")
     elif choice == '2':
-        calib_file = "calibration_results/camera_calibration_left_arm_20251222-224450.npz"
+        calib_file = "calibration_results/camera_calibration_left_arm_20251226-234053.npz"
         camera_sn = "046322250624"
         robot_ip = "192.168.100.100"
         print("\n已选择: 左臂标定")

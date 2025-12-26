@@ -12,7 +12,7 @@ print("  坐标系修复验证")
 print("="*70 + "\n")
 
 # Load calibration
-calib = np.load('calibration_results/camera_calibration_left_arm_20251222-224450.npz')
+calib = np.load('calibration_results/camera_calibration_left_arm_20251226-234053.npz')
 T_cam2base = calib['T_cam2base']
 
 print("[1] Calibration Matrix:")

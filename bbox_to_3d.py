@@ -266,8 +266,8 @@ if __name__ == "__main__":
     
     # 加载标定文件
     import os
-    if os.path.exists('calibration_results/camera_calibration_right_arm_20251222-222131.npz'):
-        calib = np.load('calibration_results/camera_calibration_right_arm_20251222-222131.npz')
+    if os.path.exists('calibration_results/camera_calibration_right_arm_20251226-234855.npz'):
+        calib = np.load('calibration_results/camera_calibration_right_arm_20251226-234855.npz')
         T_cam2base = calib['T_cam2base']
         print("✓ 标定文件已加载")
     else:

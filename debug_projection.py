@@ -28,7 +28,7 @@ def debug_projection():
     
     # 2. Load calibration
     print("\n[2/4] Loading calibration...")
-    calib = np.load('calibration_results/camera_calibration_right_arm_20251222-222131.npz')
+    calib = np.load('calibration_results/camera_calibration_right_arm_20251226-234855.npz')
     T_cam2base = calib['T_cam2base']
     print(f"✓ Calibration loaded")
     

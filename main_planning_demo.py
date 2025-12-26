@@ -18,7 +18,7 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 # ---------------------------------------------------------
 CAMERA_SN = "134222070573"       # 你的相机SN (参考 camera.py)
 ROBOT_IP = "192.168.100.101"     # 你的机械臂IP (参考 control.py, 右臂)
-CALIB_FILE = "calibration_results/camera_calibration_xxxx.npz" # 你的标定文件路径
+CALIB_FILE = "calibration_results/camera_calibration_right_arm_20251226-234855.npz" # 你的标定文件路径
 SAM_CHECKPOINT = "sam2.1_hiera_large.pt" # SAM 2.1权重路径
 
 # ---------------------------------------------------------

@@ -64,8 +64,8 @@ class RealRobotController:
         
         # Load calibration matrices (加载标定矩阵)
         print("\n[4/5] Loading calibration matrices...")
-        calib_left_path = 'calibration_results/camera_calibration_left_arm_20251222-224450.npz'
-        calib_right_path = 'calibration_results/camera_calibration_right_arm_20251222-222131.npz'
+        calib_left_path = 'calibration_results/camera_calibration_left_arm_20251226-234053.npz'
+        calib_right_path = 'calibration_results/camera_calibration_right_arm_20251226-234855.npz'
         
         if not os.path.exists(calib_left_path) or not os.path.exists(calib_right_path):
             raise FileNotFoundError("Calibration files not found!")

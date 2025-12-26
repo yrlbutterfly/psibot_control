@@ -17,7 +17,7 @@ class VisCamToBase:
             [0, intrinsics.fy, intrinsics.ppy],
             [0, 0, 1]
         ])
-        calibration_file = "/home/admin01/program/foundationpose_controller/calibration_results/camera_calibration_20250423-204545.npz"
+        calibration_file = "calibration_results/camera_calibration_right_arm_20251226-234855.npz"
         self.cam_to_base = self.calc_cam_to_base(calibration_file)
 
 

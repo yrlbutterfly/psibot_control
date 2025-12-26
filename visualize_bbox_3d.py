@@ -221,7 +221,7 @@ def main():
     print(f"✓ Base frame:   {len(pcd_base.points)} points")
     
     print("\n[3/5] Loading calibration...")
-    calib = np.load('calibration_results/camera_calibration_right_arm_20251222-222131.npz')
+    calib = np.load('calibration_results/camera_calibration_right_arm_20251226-234855.npz')
     T_cam2base = calib['T_cam2base']
     print("✓ Calibration loaded")
     

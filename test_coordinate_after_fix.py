@@ -100,7 +100,7 @@ def main():
     
     CAMERA_SN = "046322250624"
     SAM_CHECKPOINT = "sam2.1_hiera_large.pt"
-    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251222-224450.npz"
+    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251226-234053.npz"
     
     print("\n" + "="*70)
     print("  Coordinate Test After Removing Transform")

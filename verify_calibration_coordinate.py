@@ -166,7 +166,7 @@ def analyze_calibration_logic(calib_file):
 
 def main():
     """Main function"""
-    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251222-224450.npz"
+    CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251226-234053.npz"
     
     analyze_calibration_logic(CALIB_FILE_LEFT)
     

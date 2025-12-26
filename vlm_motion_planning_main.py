@@ -37,9 +37,9 @@ CONFIG = {
     "right_hand_port": "/dev/ttyUSB1",
     
     # Calibration (根据你要用哪个机械臂选择对应的标定文件)
-    "calib_file_right": "calibration_results/camera_calibration_right_arm_20251222-222131.npz",  # 右臂标定
-    "calib_file_left": "calibration_results/camera_calibration_left_arm_20251222-224450.npz",   # 左臂标定
-    "calib_file": "calibration_results/camera_calibration_right_arm_20251222-222131.npz",  # 默认使用右臂
+    "calib_file_right": "calibration_results/camera_calibration_right_arm_20251226-234855.npz",  # 右臂标定
+    "calib_file_left": "calibration_results/camera_calibration_left_arm_20251226-234053.npz",   # 左臂标定
+    "calib_file": "calibration_results/camera_calibration_right_arm_20251226-234855.npz",  # 默认使用右臂
     "intrinsics_file": "camera_intrinsics.json",
     
     # VLM

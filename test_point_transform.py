@@ -16,7 +16,7 @@ def test_point_transform():
     
     # 1. Load calibration matrix
     print("[1/4] 加载标定矩阵...")
-    calib_file = 'calibration_results/camera_calibration_right_arm_20251222-222131.npz'
+    calib_file = 'calibration_results/camera_calibration_right_arm_20251226-234855.npz'
     
     if not os.path.exists(calib_file):
         print(f"❌ 标定文件不存在: {calib_file}")

@@ -13,7 +13,7 @@ print("  标定坐标系Z轴调试")
 print("="*70 + "\n")
 
 # Load calibration
-calib_left = np.load('calibration_results/camera_calibration_left_arm_20251222-224450.npz')
+calib_left = np.load('calibration_results/camera_calibration_left_arm_20251226-234053.npz')
 T_cam2base = calib_left['T_cam2base']
 
 print("[1] Calibration Transform Matrix (T_cam2base):")
