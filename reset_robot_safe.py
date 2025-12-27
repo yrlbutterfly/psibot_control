@@ -51,7 +51,7 @@ def save_home_config(left_qpos, right_qpos):
     except Exception as e:
         print(f"\n[ERROR] Failed to save config: {e}")
 
-MOVE_SPEED = 3 # Low speed for safety
+MOVE_SPEED = 6 # Low speed for safety
 STEP_SIZE_RAD = 0.1  # ~5.7 degrees per step max change
 
 def reset_arm(arm_controller, target_qpos, arm_name="Arm"):
