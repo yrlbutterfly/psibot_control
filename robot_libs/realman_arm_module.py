@@ -47,8 +47,13 @@ class ArmControl:
     def move_joint_CANFD(self, joint_angles):
         self.robot.Movej_CANFD(radians_to_degrees(joint_angles), False)
 
-    def move_pose_Cmd(self, xyzrpy, speed=5):
-        self.robot.Movej_P_Cmd(xyzrpy, speed)
+    def move_pose_Cmd(self, xyzrpy, speed=5, block=True):
+        if isinstance(xyzrpy, np.ndarray):
+            xyzrpy = xyzrpy.tolist()
+        self.robot.Movej_P_Cmd(xyzrpy, speed, block=block)
+
+    def move_pose(self, xyzrpy, speed=5, block=True):
+        return self.move_pose_Cmd(xyzrpy, speed, block=block)
 
     def move_pose_CANFD(self, xyzrpy):
         self.robot.Movep_CANFD(xyzrpy, False)

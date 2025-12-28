@@ -1,365 +1,671 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Motion Planning Primitives for Garment Folding
-参考 Isaac Sim 代码中的折叠动作原语
-实现基本的抓取、移动、放置等动作
+VLM Motion Planning Interface
+将从视觉获取的抓取点和放置点转换为机械臂运动序列
 """
 
 import numpy as np
 import time
-from typing import Optional, Tuple
-from scipy.spatial.transform import Rotation as R
+import sys
+from reset_robot_safe import reset_arm, load_home_config
 
+def robust_input(prompt=""):
+    """
+    Robust input function that works even after OpenCV operations
+    OpenCV can corrupt stdin, so we try to read from /dev/tty directly
+    """
+    print(prompt, end='', flush=True)
+    
+    # Try to read from /dev/tty directly (bypasses corrupted stdin)
+    try:
+        with open('/dev/tty', 'r') as tty:
+            return tty.readline().rstrip('\n')
+    except:
+        # Fallback to regular input
+        try:
+            return input()
+        except EOFError:
+            raise EOFError("Cannot read input (EOF). Please run in interactive terminal.")
 
-class MotionPrimitives:
-    """Motion primitives for bimanual garment manipulation"""
+def rotation_matrix_from_euler(roll, pitch, yaw):
+    """
+    Create rotation matrix from Euler angles (RPY convention)
     
-    def __init__(self, left_arm, right_arm, left_hand, right_hand):
+    Args:
+        roll, pitch, yaw: Rotation angles in radians
+        
+    Returns:
+        3x3 rotation matrix
+    """
+    # Rotation around X-axis (Roll)
+    R_x = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll), -np.sin(roll)],
+        [0, np.sin(roll), np.cos(roll)]
+    ])
+    
+    # Rotation around Y-axis (Pitch)
+    R_y = np.array([
+        [np.cos(pitch), 0, np.sin(pitch)],
+        [0, 1, 0],
+        [-np.sin(pitch), 0, np.cos(pitch)]
+    ])
+    
+    # Rotation around Z-axis (Yaw)
+    R_z = np.array([
+        [np.cos(yaw), -np.sin(yaw), 0],
+        [np.sin(yaw), np.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    
+    # Combined rotation: R = R_z * R_y * R_x
+    R = R_z @ R_y @ R_x
+    return R
+
+def apply_hand_offset(position, orientation, offset_magnitude, direction='y'):
+    """
+    Apply hand offset in end-effector frame, transformed to base frame
+    
+    Args:
+        position: [x, y, z] position in base frame
+        orientation: [roll, pitch, yaw] orientation in radians
+        offset_magnitude: Magnitude of offset (e.g., 0.12 meters)
+        direction: Direction in end-effector frame ('x', 'y', or 'z')
+        
+    Returns:
+        Adjusted position [x, y, z]
+    """
+    # Define offset vector in end-effector frame
+    if direction == 'x':
+        offset_ee = np.array([offset_magnitude, 0, 0])
+    elif direction == 'y':
+        offset_ee = np.array([0, offset_magnitude, 0])
+    elif direction == 'z':
+        offset_ee = np.array([0, 0, offset_magnitude])
+    else:
+        raise ValueError(f"Invalid direction: {direction}")
+    
+    # Get rotation matrix from orientation
+    R = rotation_matrix_from_euler(orientation[0], orientation[1], orientation[2])
+    
+    # Transform offset to base frame
+    offset_base = R @ offset_ee
+    
+    # Apply offset to position
+    adjusted_position = np.array(position) + offset_base
+    
+    return adjusted_position
+
+class MotionPlanner:
+    def __init__(self, robot_controller):
         """
         Args:
-            left_arm: Left arm controller (ArmControl instance)
-            right_arm: Right arm controller (ArmControl instance)
-            left_hand: Left hand controller (Hand instance)
-            right_hand: Right hand controller (Hand instance)
+            robot_controller: RealRobotController instance
         """
-        self.left_arm = left_arm
-        self.right_arm = right_arm
-        self.left_hand = left_hand
-        self.right_hand = right_hand
+        self.robot = robot_controller
         
-        # Home positions (defined in robot base frame)
-        self.home_left = np.array([-0.6, 0.0, 0.5, 3.14, 0, 0])  # [x, y, z, rx, ry, rz]
-        self.home_right = np.array([0.6, 0.0, 0.5, 3.14, 0, 0])
-        
-        # Grasp orientations (vertical downward grasp for folding)
-        self.grasp_ori_left = np.array([3.14, 0, 0])  # [rx, ry, rz] in radians
-        self.grasp_ori_right = np.array([3.14, 0, 0])
-        
-        print("[INFO] Motion primitives initialized")
-    
-    def move_to_home(self, settle_time: float = 1.0):
-        """Move both arms to home position"""
-        print("[MP] Moving to home position...")
-        
-        # Move both arms simultaneously
-        self.left_arm.move_pose_Cmd(self.home_left.tolist(), speed=20)
-        self.right_arm.move_pose_Cmd(self.home_right.tolist(), speed=20)
-        
-        time.sleep(settle_time)
-        print("[MP] Reached home position")
-    
-    def open_both_hands(self):
-        """Open both hands"""
-        self.left_hand.set_angles([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-        self.right_hand.set_angles([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-        time.sleep(0.5)
-    
-    def close_hand(self, hand: str):
+        # Configuration
+        self.APPROACH_OFFSET = 0.092  # Approach from 9.2cm above target (meters)
+        self.HAND_OFFSET = 0.12       # End-effector to palm center offset
+        self.LIFT_HEIGHT = 0.1        # Lift 10cm after grasp
+        self.MOVE_SPEED = 5          # Movement speed (0-100)
+        self.STEP_SIZE = 0.05         # Step size for safety (meters)
+        self.FINAL_DROP_HEIGHT = 0.02  # 10cm - height above target position to drop from
+        # Custom orientation for left and right hands (roll, pitch, yaw) in radians
+        self.LEFT_HAND_ORIENTATION = [-2.676000, -1.347000, 0.429000]   # Default orientation for left hand
+        self.RIGHT_HAND_ORIENTATION = [-3.078000, -1.306000, -1.058000]  # Default orientation for right hand
+
+    def execute_stepwise_motion(self, active_arm, target_pose, label="Motion"):
         """
-        Close specified hand
-        Args:
-            hand: "left" or "right"
+        Execute motion in small steps with user confirmation
         """
-        close_angles = [0.4, 0.4, 0.4, 0.4, 0.4, 1.0]
-        if hand == "left":
-            self.left_hand.set_angles(close_angles)
-        elif hand == "right":
-            self.right_hand.set_angles(close_angles)
-        time.sleep(0.5)
-    
-    def open_hand(self, hand: str):
-        """
-        Open specified hand
-        Args:
-            hand: "left" or "right"
-        """
-        open_angles = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-        if hand == "left":
-            self.left_hand.set_angles(open_angles)
-        elif hand == "right":
-            self.right_hand.set_angles(open_angles)
-        time.sleep(0.5)
-    
-    def grasp_and_move(
-        self,
-        arm: str,
-        start_pos: np.ndarray,
-        target_pos: np.ndarray,
-        lift_height: float = 0.15,
-        approach_offset: float = 0.05
-    ):
-        """
-        Grasp at start_pos and move to target_pos (single arm operation)
+        current_pose = active_arm.get_current_pose()
+        start_pos = np.array(current_pose[:3])
+        end_pos = np.array(target_pose[:3])
         
-        Args:
-            arm: "left" or "right"
-            start_pos: (3,) array [x, y, z] in base frame
-            target_pos: (3,) array [x, y, z] in base frame
-            lift_height: Height to lift object above table
-            approach_offset: Offset above grasp point for pre-grasp
-        """
-        print(f"[MP] {arm.upper()} arm: Grasp and move")
+        # Get both start and target orientation for interpolation
+        start_ori = np.array(current_pose[3:])
+        target_ori = np.array(target_pose[3:])
         
-        # Select arm controller
-        if arm == "left":
-            arm_ctrl = self.left_arm
-            grasp_ori = self.grasp_ori_left
-        elif arm == "right":
-            arm_ctrl = self.right_arm
-            grasp_ori = self.grasp_ori_right
-        else:
-            raise ValueError(f"Invalid arm: {arm}")
+        dist = np.linalg.norm(end_pos - start_pos)
         
-        # Phase 1: Pre-grasp (approach from above)
-        pre_grasp_pos = start_pos.copy()
-        pre_grasp_pos[2] += approach_offset
-        pre_grasp_pose = np.concatenate([pre_grasp_pos, grasp_ori])
-        
-        print(f"  → Phase 1: Move to pre-grasp position {pre_grasp_pos}")
-        arm_ctrl.move_pose_Cmd(pre_grasp_pose.tolist(), speed=15)
-        time.sleep(0.5)
-        
-        # Phase 2: Move down to grasp position
-        grasp_pose = np.concatenate([start_pos, grasp_ori])
-        print(f"  → Phase 2: Move to grasp position {start_pos}")
-        arm_ctrl.move_pose_Cmd(grasp_pose.tolist(), speed=10)
-        time.sleep(0.5)
-        
-        # Phase 3: Close gripper
-        print(f"  → Phase 3: Close gripper")
-        self.close_hand(arm)
-        time.sleep(0.5)
-        
-        # Phase 4: Lift
-        lift_pos = start_pos.copy()
-        lift_pos[2] = lift_height
-        lift_pose = np.concatenate([lift_pos, grasp_ori])
-        print(f"  → Phase 4: Lift to {lift_pos}")
-        arm_ctrl.move_pose_Cmd(lift_pose.tolist(), speed=10)
-        time.sleep(0.5)
-        
-        # Phase 5: Move to target (at lift height)
-        target_lift_pos = target_pos.copy()
-        target_lift_pos[2] = lift_height
-        target_lift_pose = np.concatenate([target_lift_pos, grasp_ori])
-        print(f"  → Phase 5: Move to target {target_lift_pos}")
-        arm_ctrl.move_pose_Cmd(target_lift_pose.tolist(), speed=10)
-        time.sleep(0.5)
-        
-        # Phase 6: Move down to target height
-        # For folding, we want to place the fabric on top of existing layers
-        # So we use a small offset above the target position
-        place_pos = target_pos.copy()
-        place_pos[2] += 0.02  # 2cm above target
-        place_pose = np.concatenate([place_pos, grasp_ori])
-        print(f"  → Phase 6: Lower to place position {place_pos}")
-        arm_ctrl.move_pose_Cmd(place_pose.tolist(), speed=8)
-        time.sleep(0.5)
-        
-        # Phase 7: Release
-        print(f"  → Phase 7: Release gripper")
-        self.open_hand(arm)
-        time.sleep(0.5)
-        
-        # Phase 8: Retract
-        retract_pos = place_pos.copy()
-        retract_pos[2] += approach_offset
-        retract_pose = np.concatenate([retract_pos, grasp_ori])
-        print(f"  → Phase 8: Retract to {retract_pos}")
-        arm_ctrl.move_pose_Cmd(retract_pose.tolist(), speed=10)
-        time.sleep(0.5)
-        
-        print(f"[MP] {arm.upper()} arm: Grasp and move complete")
-    
-    def bimanual_fold_bottom(
-        self,
-        left_start: np.ndarray,
-        right_start: np.ndarray,
-        left_target: np.ndarray,
-        right_target: np.ndarray,
-        lift_height: float = 0.15
-    ):
-        """
-        Dual-arm bottom folding (参考 Isaac Sim 的 bottom-up fold)
-        
-        Args:
-            left_start: Left hem position (3,) [x, y, z]
-            right_start: Right hem position (3,) [x, y, z]
-            left_target: Left shoulder position (3,) [x, y, z]
-            right_target: Right shoulder position (3,) [x, y, z]
-            lift_height: Height to lift garment
-        """
-        print("[MP] Bimanual bottom fold")
-        
-        # Phase 1: Both arms move to pre-grasp
-        print("  → Phase 1: Move to pre-grasp positions")
-        left_pregrasp = left_start.copy()
-        left_pregrasp[2] += 0.05
-        right_pregrasp = right_start.copy()
-        right_pregrasp[2] += 0.05
-        
-        left_pregrasp_pose = np.concatenate([left_pregrasp, self.grasp_ori_left])
-        right_pregrasp_pose = np.concatenate([right_pregrasp, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_pregrasp_pose.tolist(), speed=15)
-        self.right_arm.move_pose_Cmd(right_pregrasp_pose.tolist(), speed=15)
-        time.sleep(1.0)
-        
-        # Phase 2: Move to grasp positions
-        print("  → Phase 2: Move to grasp positions")
-        left_grasp_pose = np.concatenate([left_start, self.grasp_ori_left])
-        right_grasp_pose = np.concatenate([right_start, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_grasp_pose.tolist(), speed=10)
-        self.right_arm.move_pose_Cmd(right_grasp_pose.tolist(), speed=10)
-        time.sleep(1.0)
-        
-        # Phase 3: Close both grippers
-        print("  → Phase 3: Close both grippers")
-        self.close_hand("left")
-        self.close_hand("right")
-        time.sleep(0.5)
-        
-        # Phase 4: Lift together
-        print("  → Phase 4: Lift garment")
-        left_lift = left_start.copy()
-        left_lift[2] = lift_height
-        right_lift = right_start.copy()
-        right_lift[2] = lift_height
-        
-        left_lift_pose = np.concatenate([left_lift, self.grasp_ori_left])
-        right_lift_pose = np.concatenate([right_lift, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_lift_pose.tolist(), speed=10)
-        self.right_arm.move_pose_Cmd(right_lift_pose.tolist(), speed=10)
-        time.sleep(1.0)
-        
-        # Phase 5: Move to target positions (fold)
-        print("  → Phase 5: Fold to targets")
-        left_target_lift = left_target.copy()
-        left_target_lift[2] = lift_height
-        right_target_lift = right_target.copy()
-        right_target_lift[2] = lift_height
-        
-        left_target_pose = np.concatenate([left_target_lift, self.grasp_ori_left])
-        right_target_pose = np.concatenate([right_target_lift, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_target_pose.tolist(), speed=8)
-        self.right_arm.move_pose_Cmd(right_target_pose.tolist(), speed=8)
-        time.sleep(1.5)
-        
-        # Phase 6: Lower and place
-        print("  → Phase 6: Lower and place")
-        left_place = left_target.copy()
-        left_place[2] += 0.02
-        right_place = right_target.copy()
-        right_place[2] += 0.02
-        
-        left_place_pose = np.concatenate([left_place, self.grasp_ori_left])
-        right_place_pose = np.concatenate([right_place, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_place_pose.tolist(), speed=8)
-        self.right_arm.move_pose_Cmd(right_place_pose.tolist(), speed=8)
-        time.sleep(1.0)
-        
-        # Phase 7: Release both
-        print("  → Phase 7: Release both grippers")
-        self.open_hand("left")
-        self.open_hand("right")
-        time.sleep(0.5)
-        
-        # Phase 8: Retract both
-        print("  → Phase 8: Retract")
-        left_retract = left_place.copy()
-        left_retract[2] += 0.05
-        right_retract = right_place.copy()
-        right_retract[2] += 0.05
-        
-        left_retract_pose = np.concatenate([left_retract, self.grasp_ori_left])
-        right_retract_pose = np.concatenate([right_retract, self.grasp_ori_right])
-        
-        self.left_arm.move_pose_Cmd(left_retract_pose.tolist(), speed=10)
-        self.right_arm.move_pose_Cmd(right_retract_pose.tolist(), speed=10)
-        time.sleep(1.0)
-        
-        print("[MP] Bimanual bottom fold complete")
-    
-    def execute_vlm_action(
-        self,
-        action: dict,
-        label_to_3d_base: dict
-    ):
-        """
-        Execute a VLM action (one step from the plan)
-        
-        Args:
-            action: Dict with format:
-                {
-                    "left": {"from": "left_cuff", "to": "right_shoulder"},
-                    "right": {"from": null, "to": null}
-                }
-            label_to_3d_base: Dict mapping keypoint labels to 3D positions in base frame
-        
-        Returns:
-            success: bool
-        """
-        print(f"[MP] Executing VLM action: {action}")
-        
-        left_cfg = action.get("left", {}) or {}
-        right_cfg = action.get("right", {}) or {}
-        
-        left_from = left_cfg.get("from")
-        left_to = left_cfg.get("to")
-        right_from = right_cfg.get("from")
-        right_to = right_cfg.get("to")
-        
-        # Check if both arms are active (bimanual fold)
-        if left_from and left_to and right_from and right_to:
-            # Bimanual operation (e.g., bottom fold)
-            left_start = label_to_3d_base.get(left_from)
-            left_end = label_to_3d_base.get(left_to)
-            right_start = label_to_3d_base.get(right_from)
-            right_end = label_to_3d_base.get(right_to)
-            
-            if None in [left_start, left_end, right_start, right_end]:
-                print(f"[ERROR] Missing keypoints for bimanual action")
-                return False
-            
-            self.bimanual_fold_bottom(left_start, right_start, left_end, right_end)
+        if dist < 0.001:
+            print(f"  [INFO] Already at target ({label})")
             return True
+
+        num_steps = int(np.ceil(dist / self.STEP_SIZE))
+        if num_steps < 1: num_steps = 1
         
-        # Single arm operations
-        elif left_from and left_to:
-            # Left arm fold (e.g., left sleeve)
-            start = label_to_3d_base.get(left_from)
-            end = label_to_3d_base.get(left_to)
+        print(f"\n  [STEPWISE] {label}")
+        print(f"  Distance: {dist:.3f}m | Steps: {num_steps} | Step size: ~{self.STEP_SIZE*100:.1f}cm")
+        print("  Controls: ENTER = Next step, 'q' = Quit")
+        
+        for i in range(1, num_steps + 1):
+            ratio = i / num_steps
+            # Interpolate both position and orientation
+            interp_pos = start_pos + (end_pos - start_pos) * ratio
+            interp_ori = start_ori + (target_ori - start_ori) * ratio  # Linear interpolation for Euler angles
             
-            if start is None or end is None:
-                print(f"[ERROR] Missing keypoints for left arm action")
+            interp_pose = np.concatenate([interp_pos, interp_ori])
+            
+            # Always prompt for user confirmation
+            try:
+                user_input = robust_input(f"    Step {i}/{num_steps} [{interp_pos[0]:.3f}, {interp_pos[1]:.3f}, {interp_pos[2]:.3f}] > ").strip().lower()
+                if user_input == 'q':
+                    print("  [INFO] Motion cancelled by user")
+                    return False
+            except EOFError as e:
+                print(f"\n  [ERROR] {e}")
                 return False
+                
+            # Execute step
+            active_arm.robot.Clear_System_Err()
+            active_arm.move_pose_Cmd(interp_pose.tolist(), self.MOVE_SPEED)
             
-            self.grasp_and_move("left", start, end)
-            return True
-        
-        elif right_from and right_to:
-            # Right arm fold (e.g., right sleeve)
-            start = label_to_3d_base.get(right_from)
-            end = label_to_3d_base.get(right_to)
+            # Wait a bit for the move to complete
+            time.sleep(0.5)
             
-            if start is None or end is None:
-                print(f"[ERROR] Missing keypoints for right arm action")
+        print(f"  ✓ {label} Completed")
+        return True
+
+    def confirm_phase(self, phase_name):
+        """Ask for user confirmation before starting a phase"""
+        print(f"\n" + "-"*40)
+        try:
+            ans = robust_input(f"[CONFIRM] Press ENTER to execute {phase_name} (or 'q' to quit): ").strip().lower()
+            if ans == 'q':
+                print("[INFO] Quit requested.")
                 return False
-            
-            self.grasp_and_move("right", start, end)
             return True
-        
-        else:
-            print(f"[WARNING] Unrecognized action format: {action}")
+        except EOFError as e:
+            print(f"\n[ERROR] {e}")
             return False
 
+    def execute_fold(self, arm_select, grasp_pos, place_pos, lift_height=None, reset_joints=None):
+        """
+        Execute generic folding motion (Grasp -> Lift -> Move -> Place -> Reset)
+        
+        Args:
+            arm_select: 'left' or 'right'
+            grasp_pos: [x, y, z] target position for grasping
+            place_pos: [x, y, z] target position for placing
+            lift_height: Lift height (optional, defaults to config)
+            reset_joints: [j1...j7] Joint angles to reset to (optional)
+            
+        Returns:
+            bool: True if successful
+        """
+        if lift_height is None:
+            lift_height = self.LIFT_HEIGHT
 
-if __name__ == "__main__":
-    print("This module defines motion primitives for garment folding.")
-    print("Import and use MotionPrimitives class in your main script.")
+        try:
+            print(f"\n[Motion] Executing Fold Sequence with {arm_select} arm")
+            
+            # Setup arm and hand functions
+            if arm_select == 'left':
+                active_arm = self.robot.left_arm
+                close_hand_fn = self.robot.close_left_hand
+                open_hand_fn = self.robot.open_left_hand
+            else:
+                active_arm = self.robot.right_arm
+                close_hand_fn = self.robot.close_right_hand
+                open_hand_fn = self.robot.open_right_hand
 
+            # Get current pose to keep orientation
+            current_pose = active_arm.get_current_pose()
+            print(f"[INFO] Current Pose: {current_pose[:3]}")
+
+            # ---------------------------------------------------------
+            # 1. Approach & Move to Grasp
+            # ---------------------------------------------------------
+            if not self.confirm_phase("Phase 1: Move to Grasp"): return False
+                
+            target_grasp = np.array(grasp_pos)
+            # 根据左右手分别处理高度(Z)和手掌偏移(Y)
+            # Phase 1 uses simple Y-axis offset and keeps current orientation
+            if arm_select == 'right':
+                target_grasp[1] += self.HAND_OFFSET # 末端 -> 手心 (+Y)
+                target_grasp[2] = -0.105+0.03  # 右手经验抓取高度
+            else: # left
+                target_grasp[1] -= self.HAND_OFFSET # 末端 -> 手心 (-Y)
+                target_grasp[2] = -0.105+0.03  # 左手经验抓取高度
+            
+            grasp_pose = np.array([
+                target_grasp[0], target_grasp[1], target_grasp[2],
+                current_pose[3], current_pose[4], current_pose[5]  # Keep current orientation
+            ])
+
+            if not self.execute_stepwise_motion(active_arm, grasp_pose, label="Phase 1 (Move to Grasp)"): return False
+
+            # ---------------------------------------------------------
+            # 2. Grasp
+            # ---------------------------------------------------------
+            if not self.confirm_phase("Phase 2: Grasp"): return False
+            close_hand_fn()
+            time.sleep(0.5)
+
+            # ---------------------------------------------------------
+            # 3. Lift
+            # ---------------------------------------------------------
+            if not self.confirm_phase("Phase 3: Lift"): return False
+
+            current_pose = active_arm.get_current_pose()
+            lift_target = np.array(current_pose)
+            lift_target[2] = -0.05
+            
+            if not self.execute_stepwise_motion(active_arm, lift_target, label="Phase 3 (Lift)"): return False
+
+            # ---------------------------------------------------------
+            # 4. Move to Target (Place Position)
+            # ---------------------------------------------------------
+            if not self.confirm_phase("Phase 4: Move to Target"): return False
+
+            # Use custom orientation based on left/right hand
+            if arm_select == 'right':
+                orientation = self.RIGHT_HAND_ORIENTATION
+            else:
+                orientation = self.LEFT_HAND_ORIENTATION
+            
+            target_place = np.array(place_pos)
+            
+            # Temporarily disabled hand offset for debugging
+            # Apply hand offset using rotation-aware transformation
+            # The offset represents end-effector to palm center distance
+            # offset_sign = 1.0 if arm_select == 'right' else -1.0
+            # target_place_adjusted = apply_hand_offset(
+            #     target_place, 
+            #     orientation, 
+            #     offset_sign * self.HAND_OFFSET,
+            #     direction='y'  # Offset is along Y-axis in end-effector frame
+            # )
+            # target_place_adjusted[2] = self.FINAL_DROP_HEIGHT
+            
+            # Use max height logic
+            #target_z = max(lift_target[2], target_place[2] + lift_height)
+            
+            place_pose_high = np.array([
+                target_place[0], target_place[1], self.FINAL_DROP_HEIGHT,
+                orientation[0], orientation[1], orientation[2]
+            ])
+
+            if not self.execute_stepwise_motion(active_arm, place_pose_high, label="Phase 4 (Move to Target)"): return False
+
+            # ---------------------------------------------------------
+            # 5. Release (Place)
+            # ---------------------------------------------------------
+            if not self.confirm_phase("Phase 5: Release"): return False
+            open_hand_fn()
+            time.sleep(0.5)
+
+            # ---------------------------------------------------------
+            # 6. Reset (Joint Reset)
+            # ---------------------------------------------------------
+            if reset_joints is not None:
+                if not self.confirm_phase("Phase 6: Reset (Joints)"): return False
+                # Use reset_arm from reset_robot_safe.py
+                success = reset_arm(active_arm, reset_joints, arm_name=f"{arm_select.capitalize()} Arm")
+                if not success: return False
+            
+            print("\n[INFO] Fold Sequence Completed!")
+            return True
+
+        except Exception as e:
+            print(f"\n✗ Motion failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+def mp_right_fold(robot_controller, grasp_pos, place_pos, lift_height=0.1, reset_joints=None):
+    """
+    右手折叠动作封装 (Right Arm Fold)
+    Grasp -> Lift -> Move -> Place -> Reset
+    """
+    if reset_joints is None:
+        # Load default safe home position
+        _, right_home = load_home_config()
+        reset_joints = right_home
+
+    planner = MotionPlanner(robot_controller)
+    return planner.execute_fold('right', grasp_pos, place_pos, lift_height, reset_joints)
+
+def mp_left_fold(robot_controller, grasp_pos, place_pos, lift_height=0.1, reset_joints=None):
+    """
+    左手折叠动作封装 (Left Arm Fold)
+    Grasp -> Lift -> Move -> Place -> Reset
+    """
+    if reset_joints is None:
+        # Load default safe home position
+        left_home, _ = load_home_config()
+        reset_joints = left_home
+
+    planner = MotionPlanner(robot_controller)
+    return planner.execute_fold('left', grasp_pos, place_pos, lift_height, reset_joints)
+
+def mp_bimanual_fold(robot_controller, left_grasp_pos, right_grasp_pos, 
+                     left_place_pos, right_place_pos, lift_height=0.1):
+    """
+    双臂同时折叠动作 (Bimanual Fold)
+    参考 Fold_Tops_HALO_mp.py 中的 mp_fold_bottom_up 逻辑
+    
+    Args:
+        robot_controller: RealRobotController instance
+        left_grasp_pos: [x, y, z] 左手抓取位置
+        right_grasp_pos: [x, y, z] 右手抓取位置
+        left_place_pos: [x, y, z] 左手放置位置
+        right_place_pos: [x, y, z] 右手放置位置
+        lift_height: 抬起高度 (meters)
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        import threading
+        
+        print("\n[Motion] Executing Bimanual Fold Sequence")
+        print("=" * 70)
+        
+        left_arm = robot_controller.left_arm
+        right_arm = robot_controller.right_arm
+        
+        # Get current orientations to keep them
+        left_current = left_arm.get_current_pose()
+        right_current = right_arm.get_current_pose()
+        
+        # Configuration constants
+        HAND_OFFSET = 0.12  # End-effector to palm center offset
+        SMALL_LIFT_HEIGHT = 0.02  # 2cm - just enough to clear surface after grasp
+        FINAL_DROP_HEIGHT = 0.02  # 10cm - height above target position to drop from
+        
+        # ---------------------------------------------------------
+        # Phase 1: 双手移动到起始点 (Grasp positions)
+        # ---------------------------------------------------------
+        print("\n[Phase 1] Preparing to move both hands to grasp positions...")
+        
+        # Prepare grasp poses with offsets
+        left_grasp = np.array(left_grasp_pos)
+        left_grasp[1] -= HAND_OFFSET  # Left hand offset
+        left_grasp[2] = -0.105 + 0.03  # Left hand Z height
+        
+        right_grasp = np.array(right_grasp_pos)
+        right_grasp[1] += HAND_OFFSET  # Right hand offset
+        right_grasp[2] = -0.105 + 0.03  # Right hand Z height
+        
+        left_grasp_pose = np.concatenate([left_grasp, left_current[3:]])
+        right_grasp_pose = np.concatenate([right_grasp, right_current[3:]])
+        
+        print(f"  → Left target: [{left_grasp[0]:.3f}, {left_grasp[1]:.3f}, {left_grasp[2]:.3f}]")
+        print(f"  → Right target: [{right_grasp[0]:.3f}, {right_grasp[1]:.3f}, {right_grasp[2]:.3f}]")
+        
+        # Use stepwise motion for safety
+        if not _execute_bimanual_stepwise_motion(
+            left_arm, right_arm, 
+            left_grasp_pose, right_grasp_pose,
+            step_size=0.05, speed=5,
+            label="Phase 1 (Move to Grasp)"
+        ):
+            return False
+        
+        # ---------------------------------------------------------
+        # Phase 2: 双手同时闭合 (Grasp)
+        # ---------------------------------------------------------
+        if not _confirm_phase_simple("Phase 2: Close Both Hands Simultaneously"): 
+            return False
+        
+        print("\n[Phase 2] Closing both hands simultaneously...")
+        # Use threading to close both hands at the same time
+        left_close_thread = threading.Thread(target=robot_controller.close_left_hand)
+        right_close_thread = threading.Thread(target=robot_controller.close_right_hand)
+        
+        left_close_thread.start()
+        right_close_thread.start()
+        
+        left_close_thread.join()
+        right_close_thread.join()
+        
+        time.sleep(0.5)
+        print("  ✓ Both hands closed simultaneously")
+        
+        # ---------------------------------------------------------
+        # Phase 3: 双手原地抬起一小段距离 (Lift Slightly)
+        # ---------------------------------------------------------
+        # print("\n[Phase 3] Preparing to lift both hands slightly (just clear the surface)...")
+        
+        # # Get current poses to ensure we keep exact XY
+        # left_current_grasp = left_arm.get_current_pose()
+        # right_current_grasp = right_arm.get_current_pose()
+        
+        # # Create lift poses: keep XY the same, only increase Z by small amount
+        # left_lift_pose = np.array(left_current_grasp).copy()
+        # left_lift_pose[2] += SMALL_LIFT_HEIGHT  # Only change Z coordinate
+        
+        # right_lift_pose = np.array(right_current_grasp).copy()
+        # right_lift_pose[2] += SMALL_LIFT_HEIGHT  # Only change Z coordinate
+        
+        # print(f"  → Small lift height: {SMALL_LIFT_HEIGHT*100:.1f}cm (just clear surface)")
+        # print(f"  → Left target: [{left_lift_pose[0]:.3f}, {left_lift_pose[1]:.3f}, {left_lift_pose[2]:.3f}]")
+        # print(f"  → Right target: [{right_lift_pose[0]:.3f}, {right_lift_pose[1]:.3f}, {right_lift_pose[2]:.3f}]")
+        
+        # # Use stepwise motion for safety (slow lift)
+        # if not _execute_bimanual_stepwise_motion(
+        #     left_arm, right_arm,
+        #     left_lift_pose, right_lift_pose,
+        #     step_size=0.01, speed=5,  # Very small steps for vertical lift (1cm steps)
+        #     label="Phase 3 (Lift Slightly)"
+        # ):
+        #     return False
+        
+        # ---------------------------------------------------------
+        # Phase 4: 移动到放置位置并抬高 (Move to Place and Lift)
+        # ---------------------------------------------------------
+        print("\n[Phase 4] Preparing to move to place positions while lifting...")
+        
+        # Prepare place poses with offsets
+        left_place = np.array(left_place_pos)
+        left_place[1] -= HAND_OFFSET + 0.1  # Slight overshoot for folding
+        # Set final height: target Z + 10cm for dropping
+        left_place[2] = FINAL_DROP_HEIGHT  # 10cm above target
+        
+        right_place = np.array(right_place_pos)
+        right_place[1] += HAND_OFFSET + 0.1  # Slight overshoot for folding
+        right_place[2] = FINAL_DROP_HEIGHT  # 10cm above target
+        
+        left_place_pose = np.concatenate([left_place, left_current[3:]])
+        right_place_pose = np.concatenate([right_place, right_current[3:]])
+        
+        print(f"  → Final drop height: {FINAL_DROP_HEIGHT*100:.0f}cm above target")
+        print(f"  → Left target: [{left_place[0]:.3f}, {left_place[1]:.3f}, {left_place[2]:.3f}]")
+        print(f"  → Right target: [{right_place[0]:.3f}, {right_place[1]:.3f}, {right_place[2]:.3f}]")
+        print(f"  → Will move horizontally while gradually lifting")
+        
+        # Use stepwise motion for safety (moving and lifting simultaneously)
+        if not _execute_bimanual_stepwise_motion(
+            left_arm, right_arm,
+            left_place_pose, right_place_pose,
+            step_size=0.05, speed=5,  # Slow and careful movement
+            label="Phase 4 (Move & Lift to Drop Point)"
+        ):
+            return False
+        
+        # ---------------------------------------------------------
+        # Phase 5: 同时松开双手让衣服下落 (Release and Drop)
+        # ---------------------------------------------------------
+        if not _confirm_phase_simple("Phase 5: Open Both Hands to Drop Garment"): 
+            return False
+        
+        print("\n[Phase 5] Opening both hands to drop garment...")
+        print(f"  → Garment will drop from {FINAL_DROP_HEIGHT*100:.0f}cm height to target position")
+        
+        # Use threading to open both hands at the same time
+        left_open_thread = threading.Thread(target=robot_controller.open_left_hand)
+        right_open_thread = threading.Thread(target=robot_controller.open_right_hand)
+        
+        left_open_thread.start()
+        right_open_thread.start()
+        
+        left_open_thread.join()
+        right_open_thread.join()
+        
+        time.sleep(0.5)
+        print("  ✓ Both hands opened - garment dropped to target position")
+        
+        # ---------------------------------------------------------
+        # Phase 6: 重置双手 (Reset Both Arms)
+        # ---------------------------------------------------------
+        if not _confirm_phase_simple("Phase 6: Reset Both Arms to Home"): 
+            return False
+        
+        print("\n[Phase 6] Resetting both arms to home positions...")
+        left_home, right_home = load_home_config()
+        
+        if left_home is not None:
+            reset_arm(left_arm, left_home, arm_name="Left Arm")
+        
+        if right_home is not None:
+            reset_arm(right_arm, right_home, arm_name="Right Arm")
+        
+        print("\n[SUCCESS] Bimanual Fold Sequence Completed!")
+        print("=" * 70)
+        return True
+        
+    except Exception as e:
+        print(f"\n✗ Bimanual motion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def _confirm_phase_simple(phase_name):
+    """Helper function for phase confirmation"""
+    print(f"\n" + "-"*40)
+    try:
+        ans = robust_input(f"[CONFIRM] Press ENTER to execute {phase_name} (or 'q' to quit): ").strip().lower()
+        if ans == 'q':
+            print("[INFO] Quit requested.")
+            return False
+        return True
+    except EOFError as e:
+        print(f"\n[ERROR] {e}")
+        return False
+
+def _wait_for_position_reached(arm, target_pose, tolerance=0.01, timeout=30.0, check_interval=0.1):
+    """
+    Wait until arm reaches target position
+    
+    Args:
+        arm: ArmControl instance
+        target_pose: Target pose [x, y, z, rx, ry, rz]
+        tolerance: Position tolerance in meters
+        timeout: Maximum wait time in seconds
+        check_interval: Time between position checks
+        
+    Returns:
+        bool: True if reached, False if timeout
+    """
+    import time
+    start_time = time.time()
+    target_pos = np.array(target_pose[:3])
+    
+    while (time.time() - start_time) < timeout:
+        current_pose = arm.get_current_pose()
+        current_pos = np.array(current_pose[:3])
+        distance = np.linalg.norm(current_pos - target_pos)
+        
+        if distance < tolerance:
+            return True
+        
+        time.sleep(check_interval)
+    
+    # Timeout
+    current_pose = arm.get_current_pose()
+    current_pos = np.array(current_pose[:3])
+    distance = np.linalg.norm(current_pos - target_pos)
+    print(f"  [WARNING] Timeout waiting for position. Distance: {distance:.3f}m")
+    return False
+
+def _execute_bimanual_stepwise_motion(left_arm, right_arm, left_target_pose, right_target_pose, 
+                                       step_size=0.05, speed=5, label="Motion"):
+    """
+    Execute bimanual stepwise motion with user confirmation at each step
+    Both arms move simultaneously in small steps
+    
+    Args:
+        left_arm: Left ArmControl instance
+        right_arm: Right ArmControl instance
+        left_target_pose: Target pose for left arm [x, y, z, rx, ry, rz]
+        right_target_pose: Target pose for right arm [x, y, z, rx, ry, rz]
+        step_size: Step size in meters (default: 0.05m = 5cm)
+        speed: Movement speed (0-100, default: 10 for safety)
+        label: Label for this motion phase
+        
+    Returns:
+        bool: True if successful, False if cancelled
+    """
+    # Get current poses
+    left_current = left_arm.get_current_pose()
+    right_current = right_arm.get_current_pose()
+    
+    left_start_pos = np.array(left_current[:3])
+    right_start_pos = np.array(right_current[:3])
+    
+    left_end_pos = np.array(left_target_pose[:3])
+    right_end_pos = np.array(right_target_pose[:3])
+    
+    left_ori = np.array(left_target_pose[3:])
+    right_ori = np.array(right_target_pose[3:])
+    
+    # Calculate distances
+    left_dist = np.linalg.norm(left_end_pos - left_start_pos)
+    right_dist = np.linalg.norm(right_end_pos - right_start_pos)
+    max_dist = max(left_dist, right_dist)
+    
+    if max_dist < 0.001:
+        print(f"  [INFO] Already at target ({label})")
+        return True
+    
+    # Calculate number of steps based on max distance
+    num_steps = int(np.ceil(max_dist / step_size))
+    if num_steps < 1: num_steps = 1
+    
+    print(f"\n  [BIMANUAL STEPWISE] {label}")
+    print(f"  Left distance: {left_dist:.3f}m | Right distance: {right_dist:.3f}m")
+    print(f"  Steps: {num_steps} | Step size: ~{step_size*100:.1f}cm | Speed: {speed}")
+    print("  Controls: ENTER = Next step, 'q' = Quit")
+    
+    for i in range(1, num_steps + 1):
+        ratio = i / num_steps
+        
+        # Calculate interpolated positions for both arms
+        left_interp_pos = left_start_pos + (left_end_pos - left_start_pos) * ratio
+        right_interp_pos = right_start_pos + (right_end_pos - right_start_pos) * ratio
+        
+        left_interp_pose = np.concatenate([left_interp_pos, left_ori])
+        right_interp_pose = np.concatenate([right_interp_pos, right_ori])
+        
+        # User confirmation
+        try:
+            user_input = robust_input(
+                f"    Step {i}/{num_steps} | "
+                f"L:[{left_interp_pos[0]:.3f}, {left_interp_pos[1]:.3f}, {left_interp_pos[2]:.3f}] "
+                f"R:[{right_interp_pos[0]:.3f}, {right_interp_pos[1]:.3f}, {right_interp_pos[2]:.3f}] > "
+            ).strip().lower()
+            
+            if user_input == 'q':
+                print("  [INFO] Motion cancelled by user")
+                return False
+        except EOFError as e:
+            print(f"\n  [ERROR] {e}")
+            return False
+        
+        # Execute step for both arms simultaneously
+        left_arm.robot.Clear_System_Err()
+        right_arm.robot.Clear_System_Err()
+        
+        left_arm.move_pose_Cmd(left_interp_pose.tolist(), speed, block=False)
+        right_arm.move_pose_Cmd(right_interp_pose.tolist(), speed, block=False)
+        
+        # Wait for both arms to reach positions
+        _wait_for_position_reached(left_arm, left_interp_pose, tolerance=0.015, timeout=20.0)
+        _wait_for_position_reached(right_arm, right_interp_pose, tolerance=0.015, timeout=20.0)
+    
+    print(f"  ✓ {label} Completed")
+    return True

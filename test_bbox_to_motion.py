@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-测试从bbox到motion planning的完整流程
-Test complete pipeline: bbox annotation -> 3D mapping -> left arm motion planning
+测试从bbox到motion planning的完整流程 - 抓取并放置
+Test complete pipeline: bbox annotation (Grasp & Place) -> 3D mapping -> Motion Sequence
 """
 
 import cv2
@@ -10,12 +10,14 @@ import numpy as np
 import open3d as o3d
 import os
 import sys
+import time
+import json
 
 # Import custom modules
 from get_garment_pointcloud import GarmentPointCloudExtractor
 from bbox_to_3d import project_pcd_to_image, get_3d_center_from_bbox
 from real_robot_controller import RealRobotController
-
+# from motion_primitives import MotionPlanner # Removed as we use the functional interface now
 
 class BboxAnnotator:
     """Interactive bbox annotation tool"""
@@ -59,22 +61,31 @@ class BboxAnnotator:
             self.bbox = [x_min, y_min, x_max, y_max]
             print(f"[INFO] Bbox drawn: [{x_min}, {y_min}, {x_max}, {y_max}]")
 
-    def annotate(self):
+    def annotate(self, title="Draw Bbox"):
         """
         Interactive bbox annotation
+
+        Args:
+            title: Window title and prompt
 
         Returns:
             bbox: [x_min, y_min, x_max, y_max] or None if cancelled
         """
+        # Reset state for new annotation
+        self.bbox = None
+        self.drawing = False
+        self.start_point = None
+        self.current_point = None
+        
         print("\n" + "="*50)
-        print("Interactive Bbox Annotation:")
+        print(f"Interactive Bbox Annotation: {title}")
         print("  - Click and drag to draw bbox")
         print("  - Press SPACE to confirm")
         print("  - Press 'R' to reset")
         print("  - Press ESC to cancel")
         print("="*50 + "\n")
 
-        window_name = "Draw Bbox"
+        window_name = title
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 1000, 750)
         cv2.setMouseCallback(window_name, self.mouse_callback)
@@ -90,11 +101,11 @@ class BboxAnnotator:
                 x_min, y_min, x_max, y_max = self.bbox
                 cv2.rectangle(display, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 0), 2)
                 # Add label
-                cv2.putText(display, "Target Area", (int(x_min), int(y_min)-10),
+                cv2.putText(display, title, (int(x_min), int(y_min)-10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # Show instructions
-            cv2.putText(display, "Draw bbox | SPACE: Confirm | R: Reset | ESC: Cancel",
+            cv2.putText(display, f"{title} | SPACE: Confirm | R: Reset | ESC: Cancel",
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             cv2.imshow(window_name, display)
@@ -120,17 +131,21 @@ class BboxAnnotator:
         return self.bbox
 
 
-def visualize_projection_with_bbox(color_img, pcd_points_cam, camera_intrinsics, bbox, target_3d_cam):
+def visualize_projection_with_bboxes(color_img, pcd_points_cam, camera_intrinsics, bboxes, targets_3d_cam, labels=None):
     """
-    Visualize point cloud projection on image with bbox and target point
+    Visualize point cloud projection on image with multiple bboxes and target points
 
     Args:
         color_img: RGB image
         pcd_points_cam: Point cloud in camera frame
         camera_intrinsics: Camera intrinsic matrix
-        bbox: [x_min, y_min, x_max, y_max]
-        target_3d_cam: Target 3D point in camera frame
+        bboxes: List of [x_min, y_min, x_max, y_max]
+        targets_3d_cam: List of Target 3D points in camera frame (numpy arrays)
+        labels: List of label strings
     """
+    if labels is None:
+        labels = [f"Target {i+1}" for i in range(len(bboxes))]
+
     # Project point cloud to image
     us, vs, valid = project_pcd_to_image(pcd_points_cam, camera_intrinsics)
 
@@ -142,26 +157,29 @@ def visualize_projection_with_bbox(color_img, pcd_points_cam, camera_intrinsics,
         if is_valid and 0 <= u < color_img.shape[1] and 0 <= v < color_img.shape[0]:
             cv2.circle(vis_img, (int(u), int(v)), 1, (0, 255, 0), -1)
 
-    # Draw bbox (yellow)
-    x_min, y_min, x_max, y_max = bbox
-    cv2.rectangle(vis_img, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 255), 2)
-    cv2.putText(vis_img, "Target Area", (int(x_min), int(y_min)-10),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    colors = [(0, 255, 255), (255, 0, 255), (255, 255, 0), (0, 255, 0)] # Yellow, Magenta, Cyan, Green
 
-    # Project target 3D point to image (red cross)
-    # target_3d_cam is already in the same coordinate system as pcd_points_cam
-    # Use the same projection method as project_pcd_to_image
-    target_us, target_vs, target_valid = project_pcd_to_image(
-        target_3d_cam.reshape(1, 3), camera_intrinsics
-    )
-    target_u, target_v = int(target_us[0]), int(target_vs[0])
+    for i, (bbox, target_3d, label) in enumerate(zip(bboxes, targets_3d_cam, labels)):
+        color = colors[i % len(colors)]
+        
+        # Draw bbox
+        x_min, y_min, x_max, y_max = bbox
+        cv2.rectangle(vis_img, (int(x_min), int(y_min)), (int(x_max), int(y_max)), color, 2)
+        cv2.putText(vis_img, label, (int(x_min), int(y_min)-10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-    if 0 <= target_u < color_img.shape[1] and 0 <= target_v < color_img.shape[0]:
-        # Draw red cross marker
-        cv2.drawMarker(vis_img, (target_u, target_v), (0, 0, 255), 
-                      cv2.MARKER_CROSS, 20, 3)
-        cv2.putText(vis_img, "Target 3D", (target_u+15, target_v-10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # Project target 3D point to image (cross)
+        target_us, target_vs, target_valid = project_pcd_to_image(
+            target_3d.reshape(1, 3), camera_intrinsics
+        )
+        target_u, target_v = int(target_us[0]), int(target_vs[0])
+
+        if 0 <= target_u < color_img.shape[1] and 0 <= target_v < color_img.shape[0]:
+            # Draw cross marker
+            cv2.drawMarker(vis_img, (target_u, target_v), (0, 0, 255), 
+                          cv2.MARKER_CROSS, 20, 3)
+            cv2.putText(vis_img, f"{label} 3D", (target_u+15, target_v-10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     # Save and display
     cv2.imwrite("bbox_projection_overlay.png", vis_img)
@@ -169,11 +187,63 @@ def visualize_projection_with_bbox(color_img, pcd_points_cam, camera_intrinsics,
 
     cv2.namedWindow("Bbox to 3D Projection", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Bbox to 3D Projection", 1000, 750)
+    
+    # Add instruction text to image
+    cv2.putText(vis_img, "Press SPACE/ENTER to Confirm Motion", (20, 40), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    cv2.putText(vis_img, "Press ESC to Cancel", (20, 80), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    
     cv2.imshow("Bbox to 3D Projection", vis_img)
-    print("\n[INFO] Press any key to close visualization...")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    print("\n[INFO] Waiting for user confirmation in GUI window...")
+    print("       Press SPACE/ENTER to confirm motion, ESC to cancel.")
+    
+    proceed = False
+    
+    # Loop to wait for key and handle window events better
+    while True:
+        k = cv2.waitKey(100)
+        
+        if k == 27: # ESC
+            print("[INFO] User cancelled via GUI")
+            proceed = False
+            break
+        elif k == 32 or k == 13: # SPACE or ENTER
+            print("[INFO] User confirmed via GUI")
+            proceed = True
+            break
+            
+        # Check if window was closed by X button (robustness check)
+        try:
+            if cv2.getWindowProperty("Bbox to 3D Projection", cv2.WND_PROP_VISIBLE) < 1:
+                print("[INFO] Window closed, treating as cancel")
+                proceed = False
+                break
+        except:
+            proceed = False
+            break
 
+    cv2.destroyAllWindows()
+    for _ in range(10): cv2.waitKey(1) # Pump events multiple times to clear buffer
+    time.sleep(0.5) # Give system time to restore focus to terminal
+    
+    return proceed
+
+
+def robust_input_main(prompt=""):
+    """
+    Robust input function for main script
+    Works even after OpenCV operations by reading from /dev/tty directly
+    """
+    print(prompt, end='', flush=True)
+    try:
+        with open('/dev/tty', 'r') as tty:
+            return tty.readline().rstrip('\n')
+    except:
+        try:
+            return input()
+        except EOFError:
+            return ""  # Return empty string as default
 
 def main():
     """Main test pipeline"""
@@ -184,40 +254,74 @@ def main():
     CALIB_FILE_LEFT = "calibration_results/camera_calibration_left_arm_20251226-234053.npz"
     CALIB_FILE_RIGHT = "calibration_results/camera_calibration_right_arm_20251226-234855.npz"
 
-    # Arm selection: 'left' or 'right'
+    # Arm selection: 'left', 'right', or 'bimanual'
     ARM_SELECT = 'right'  # Default to right arm
+    CONTROL_MODE = 'single'  # 'single' or 'bimanual'
 
     # Safety parameters
-    SAFE_HEIGHT = -0.5  # Modified: Allow going lower than table for now (user confirmation required)
-    # SAFE_HEIGHT = 0.3  # Original value
-    APPROACH_OFFSET = 0.095   # Approach from 0cm above target (meters)
-    HAND_OFFSET = 0.12 # 末端执行器转手心，往后
-    MOVE_SPEED = 5  # Movement speed (0-100)
-
+    SAFE_HEIGHT = -0.5  # Modified: Allow going lower than table for now
+    LIFT_HEIGHT = 0.08 # Lift 10cm after grasp
+    
     # ==================== Manual Offset Correction (Debug) ====================
-    # 如果发现位置有系统性偏差（比如偏左、偏右），可以在这里进行微调
-    # 坐标系参考 (基座坐标系):
-    #   X: 前后 (正=前, 负=后)
-    #   Y: 左右 (正=左, 负=右)  <- 如果偏左，尝试减小Y (例如 -0.02 表示向右移2cm)
-    #   Z: 上下 (正=上, 负=下)
     MANUAL_OFFSET_X = 0.0   # meters
     MANUAL_OFFSET_Y = 0.0   # meters
     MANUAL_OFFSET_Z = 0.0   # meters
     # ==========================================================================
 
     print("\n" + "="*70)
-    print(f"  Bbox to Motion Planning Test ({ARM_SELECT.capitalize()} Arm)")
-    print(f"  测试从bbox标注到{ARM_SELECT}手运动规划的完整流程")
+    print(f"  Grasp & Place Motion Test")
+    print(f"  测试: 抓取点 -> 抬起 -> 放置点 -> 放下")
     print("="*70)
 
-    # Select arm
-    arm_choice = input(f"Select arm to control (left/right) [default={ARM_SELECT}]: ").strip().lower()
-    if arm_choice in ['left', 'right']:
-        ARM_SELECT = arm_choice
-    print(f"[INFO] Selected arm: {ARM_SELECT.upper()}")
+    # Select control mode
+    mode_choice = robust_input_main("Select control mode (1=single arm, 2=bimanual) [default=1]: ").strip()
+    if mode_choice == '2':
+        CONTROL_MODE = 'bimanual'
+        print("[INFO] Selected mode: BIMANUAL (双臂)")
+    else:
+        CONTROL_MODE = 'single'
+        # Select arm for single mode
+        arm_choice = robust_input_main(f"Select arm to control (left/right) [default={ARM_SELECT}]: ").strip().lower()
+        if arm_choice in ['left', 'right']:
+            ARM_SELECT = arm_choice
+        print(f"[INFO] Selected mode: SINGLE ARM - {ARM_SELECT.upper()}")
+
+    # ==================== Step 0: Move to Photo Position ====================
+    PHOTO_CONFIG_FILE = "robot_photo_config.json"
+    HOME_CONFIG_FILE = "robot_home_config.json"
+
+    def move_to_preset(config_file, pose_name):
+        print(f"\n[Pre-Check] Moving robot to {pose_name} position...")
+        if not os.path.exists(config_file):
+            print(f"  [SKIP] Config file {config_file} not found.")
+            return
+        
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Initialize temp controller
+            tmp_robot = RealRobotController()
+            
+            if 'left' in config:
+                print(f"  Moving Left Arm to {pose_name}...")
+                tmp_robot.left_arm.move_joint(config['left'], speed=6, block=True)
+            
+            if 'right' in config:
+                print(f"  Moving Right Arm to {pose_name}...")
+                tmp_robot.right_arm.move_joint(config['right'], speed=6, block=True)
+                
+            tmp_robot.close()
+            print(f"  ✓ Robot at {pose_name}")
+            
+        except Exception as e:
+            print(f"  [WARNING] Failed to move to {pose_name}: {e}")
+
+    # Move to Photo position before capture
+    move_to_preset(PHOTO_CONFIG_FILE, "Photo")
 
     # ==================== Step 1: Get Garment Point Cloud ====================
-    print("\n[Step 1/5] Acquiring garment point cloud...")
+    print("\n[Step 1/6] Acquiring garment point cloud...")
     print("           获取衣物点云...")
 
     extractor = GarmentPointCloudExtractor(
@@ -250,184 +354,245 @@ def main():
     extractor.camera.close()
     print("  ✓ Camera closed (freed for motion planning stage)")
 
-    # ==================== Step 2: Manual Bbox Annotation ====================
-    print("\n[Step 2/5] Annotating target bbox...")
-    print("           手动标注目标区域...")
+    # Move back to Home position after capture
+    move_to_preset(HOME_CONFIG_FILE, "Home")
+
+    # ==================== Step 2: Annotate Points ====================
+    print("\n[Step 2/6] Annotating Grasp and Place points...")
+    print("           标注抓取点和放置点...")
 
     annotator = BboxAnnotator(color_img)
-    bbox = annotator.annotate()
+    
+    if CONTROL_MODE == 'single':
+        # Single arm mode: annotate 2 points (grasp, place)
+        # 2.1 Annotate Grasp Point
+        print("\n  >> Please draw GRASP area")
+        bbox_grasp = annotator.annotate(title="1. Draw GRASP Area")
+        if bbox_grasp is None:
+            print("[ERROR] Grasp annotation cancelled")
+            return
+        print(f"  ✓ Grasp bbox: {bbox_grasp}")
 
-    if bbox is None:
-        print("[ERROR] Bbox annotation cancelled")
-        return
+        # 2.2 Annotate Place Point
+        print("\n  >> Please draw PLACE area")
+        bbox_place = annotator.annotate(title="2. Draw PLACE Area")
+        if bbox_place is None:
+            print("[ERROR] Place annotation cancelled")
+            return
+        print(f"  ✓ Place bbox: {bbox_place}")
+        
+    else:  # CONTROL_MODE == 'bimanual'
+        # Bimanual mode: annotate 4 points (left grasp, left place, right grasp, right place)
+        print("\n  >> Please draw LEFT hand GRASP area")
+        bbox_left_grasp = annotator.annotate(title="1. Left GRASP Area")
+        if bbox_left_grasp is None:
+            print("[ERROR] Left grasp annotation cancelled")
+            return
+        print(f"  ✓ Left Grasp bbox: {bbox_left_grasp}")
+        
+        print("\n  >> Please draw LEFT hand PLACE area")
+        bbox_left_place = annotator.annotate(title="2. Left PLACE Area")
+        if bbox_left_place is None:
+            print("[ERROR] Left place annotation cancelled")
+            return
+        print(f"  ✓ Left Place bbox: {bbox_left_place}")
+        
+        print("\n  >> Please draw RIGHT hand GRASP area")
+        bbox_right_grasp = annotator.annotate(title="3. Right GRASP Area")
+        if bbox_right_grasp is None:
+            print("[ERROR] Right grasp annotation cancelled")
+            return
+        print(f"  ✓ Right Grasp bbox: {bbox_right_grasp}")
+        
+        print("\n  >> Please draw RIGHT hand PLACE area")
+        bbox_right_place = annotator.annotate(title="4. Right PLACE Area")
+        if bbox_right_place is None:
+            print("[ERROR] Right place annotation cancelled")
+            return
+        print(f"  ✓ Right Place bbox: {bbox_right_place}")
 
-    print(f"  ✓ Bbox annotated: {bbox}")
-
-    # ==================== Step 3: Map Bbox to 3D ====================
-    print("\n[Step 3/5] Mapping bbox to 3D position...")
-    print("           将bbox映射到3D坐标...")
-
-    # Load calibration based on selected arm
-    calib_file = CALIB_FILE_LEFT if ARM_SELECT == 'left' else CALIB_FILE_RIGHT
-
-    if not os.path.exists(calib_file):
-        print(f"[ERROR] Calibration file not found: {calib_file}")
-        return
-
-    calib_data = np.load(calib_file)
-    T_cam2base = calib_data['T_cam2base']
-    # camera_intrinsics already obtained before closing camera
+    # ==================== Step 3: Map to 3D ====================
+    print("\n[Step 3/6] Mapping to 3D positions...")
+    print("           映射到3D坐标...")
 
     # Project point cloud to image
     us, vs, valid_mask = project_pcd_to_image(garment_points_cam, camera_intrinsics)
 
-    # Get 3D center from bbox
-    result = get_3d_center_from_bbox(
-        bbox, garment_points_cam, us, vs, valid_mask,
-        img_width, img_height, T_cam2base, sample_stride=3
-    )
+    # Helper to get 3D point
+    def get_point_3d(bbox, label, T_cam2base):
+        result = get_3d_center_from_bbox(
+            bbox, garment_points_cam, us, vs, valid_mask,
+            img_width, img_height, T_cam2base, sample_stride=3
+        )
+        if result is None:
+            print(f"[ERROR] Failed to map {label} bbox to 3D")
+            return None, None
+        return result
 
-    if result is None:
-        print("[ERROR] Failed to map bbox to 3D")
+    if CONTROL_MODE == 'single':
+        # Single arm mode
+        # Load calibration based on selected arm
+        calib_file = CALIB_FILE_LEFT if ARM_SELECT == 'left' else CALIB_FILE_RIGHT
+
+        if not os.path.exists(calib_file):
+            print(f"[ERROR] Calibration file not found: {calib_file}")
+            return
+
+        calib_data = np.load(calib_file)
+        T_cam2base = calib_data['T_cam2base']
+
+        # Get Grasp 3D
+        grasp_3d_base, grasp_3d_cam = get_point_3d(bbox_grasp, "Grasp", T_cam2base)
+        if grasp_3d_base is None: return
+
+        # Get Place 3D
+        place_3d_base, place_3d_cam = get_point_3d(bbox_place, "Place", T_cam2base)
+        if place_3d_base is None: return
+
+        # Apply offsets
+        if MANUAL_OFFSET_X != 0 or MANUAL_OFFSET_Y != 0 or MANUAL_OFFSET_Z != 0:
+            offset = np.array([MANUAL_OFFSET_X, MANUAL_OFFSET_Y, MANUAL_OFFSET_Z])
+            grasp_3d_base += offset
+            place_3d_base += offset
+            print(f"  [DEBUG] Applied manual offset: {offset}")
+
+        print(f"  ✓ Grasp Position: [{grasp_3d_base[0]:.3f}, {grasp_3d_base[1]:.3f}, {grasp_3d_base[2]:.3f}] m")
+        print(f"  ✓ Place Position: [{place_3d_base[0]:.3f}, {place_3d_base[1]:.3f}, {place_3d_base[2]:.3f}] m")
+
+        # Visualize and Confirm
+        print("\n[INFO] Visualizing points...")
+        proceed = visualize_projection_with_bboxes(
+            color_img, garment_points_cam, camera_intrinsics,
+            [bbox_grasp, bbox_place],
+            [grasp_3d_cam, place_3d_cam],
+            ["Grasp", "Place"]
+        )
+
+    else:  # CONTROL_MODE == 'bimanual'
+        # Bimanual mode: need both calibrations
+        if not os.path.exists(CALIB_FILE_LEFT) or not os.path.exists(CALIB_FILE_RIGHT):
+            print(f"[ERROR] Calibration files not found")
+            print(f"  Left: {CALIB_FILE_LEFT}")
+            print(f"  Right: {CALIB_FILE_RIGHT}")
+            return
+
+        calib_data_left = np.load(CALIB_FILE_LEFT)
+        calib_data_right = np.load(CALIB_FILE_RIGHT)
+        T_cam2base_left = calib_data_left['T_cam2base']
+        T_cam2base_right = calib_data_right['T_cam2base']
+
+        # Get Left Grasp & Place 3D
+        left_grasp_3d_base, left_grasp_3d_cam = get_point_3d(bbox_left_grasp, "Left Grasp", T_cam2base_left)
+        if left_grasp_3d_base is None: return
+        
+        left_place_3d_base, left_place_3d_cam = get_point_3d(bbox_left_place, "Left Place", T_cam2base_left)
+        if left_place_3d_base is None: return
+
+        # Get Right Grasp & Place 3D
+        right_grasp_3d_base, right_grasp_3d_cam = get_point_3d(bbox_right_grasp, "Right Grasp", T_cam2base_right)
+        if right_grasp_3d_base is None: return
+        
+        right_place_3d_base, right_place_3d_cam = get_point_3d(bbox_right_place, "Right Place", T_cam2base_right)
+        if right_place_3d_base is None: return
+
+        # Apply offsets
+        if MANUAL_OFFSET_X != 0 or MANUAL_OFFSET_Y != 0 or MANUAL_OFFSET_Z != 0:
+            offset = np.array([MANUAL_OFFSET_X, MANUAL_OFFSET_Y, MANUAL_OFFSET_Z])
+            left_grasp_3d_base += offset
+            left_place_3d_base += offset
+            right_grasp_3d_base += offset
+            right_place_3d_base += offset
+            print(f"  [DEBUG] Applied manual offset: {offset}")
+
+        print(f"  ✓ Left Grasp:  [{left_grasp_3d_base[0]:.3f}, {left_grasp_3d_base[1]:.3f}, {left_grasp_3d_base[2]:.3f}] m")
+        print(f"  ✓ Left Place:  [{left_place_3d_base[0]:.3f}, {left_place_3d_base[1]:.3f}, {left_place_3d_base[2]:.3f}] m")
+        print(f"  ✓ Right Grasp: [{right_grasp_3d_base[0]:.3f}, {right_grasp_3d_base[1]:.3f}, {right_grasp_3d_base[2]:.3f}] m")
+        print(f"  ✓ Right Place: [{right_place_3d_base[0]:.3f}, {right_place_3d_base[1]:.3f}, {right_place_3d_base[2]:.3f}] m")
+
+        # Visualize and Confirm (show all 4 points)
+        print("\n[INFO] Visualizing points...")
+        proceed = visualize_projection_with_bboxes(
+            color_img, garment_points_cam, camera_intrinsics,
+            [bbox_left_grasp, bbox_left_place, bbox_right_grasp, bbox_right_place],
+            [left_grasp_3d_cam, left_place_3d_cam, right_grasp_3d_cam, right_place_3d_cam],
+            ["L_Grasp", "L_Place", "R_Grasp", "R_Place"]
+        )
+
+    if not proceed:
+        print("\n[INFO] Motion cancelled by user")
         return
 
-    target_3d_base, target_3d_cam = result
-    print(f"  ✓ Target 3D position (base frame): [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
-    print(f"  ✓ Target 3D position (camera frame): [{target_3d_cam[0]:.3f}, {target_3d_cam[1]:.3f}, {target_3d_cam[2]:.3f}] m")
-
-    # Visualize projection
-    print("\n[INFO] Visualizing projection...")
-    visualize_projection_with_bbox(color_img, garment_points_cam, camera_intrinsics, bbox, target_3d_cam)
-
-    # Apply manual offset
-    if MANUAL_OFFSET_X != 0 or MANUAL_OFFSET_Y != 0 or MANUAL_OFFSET_Z != 0:
-        print(f"\n  [DEBUG] Applying manual offset: [{MANUAL_OFFSET_X}, {MANUAL_OFFSET_Y}, {MANUAL_OFFSET_Z}]")
-        target_3d_base[0] += MANUAL_OFFSET_X
-        target_3d_base[1] += MANUAL_OFFSET_Y
-        target_3d_base[2] += MANUAL_OFFSET_Z
-        print(f"  ✓ Adjusted Target (base frame): [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
-
     # ==================== Step 4: Safety Check ====================
-    print("\n[Step 4/5] Safety check...")
-    print("           安全检查...")
-
-    # Check if target height is safe
-    print(f"  [Safety Check] Target Height: {target_3d_base[2]:.3f}m, Safe Threshold: {SAFE_HEIGHT}m")
-    if target_3d_base[2] < SAFE_HEIGHT:
-        print(f"  ⚠️  WARNING: Target height ({target_3d_base[2]:.3f}m) is below safe threshold ({SAFE_HEIGHT}m)")
-        # print(f"  ⚠️  Adjusting target height to {SAFE_HEIGHT}m for safety")
-        # target_3d_base[2] = SAFE_HEIGHT
-        print(f"  ⚠️  SKIPPING adjustment (as requested by user feedback). BE CAREFUL!")
-
-    print(f"  ✓ Target position: [{target_3d_base[0]:.3f}, {target_3d_base[1]:.3f}, {target_3d_base[2]:.3f}] m")
+    print("\n[Step 4/6] Safety check...")
+    
+    if CONTROL_MODE == 'single':
+        for label, pos in [("Grasp", grasp_3d_base), ("Place", place_3d_base)]:
+            if pos[2] < SAFE_HEIGHT:
+                print(f"  ⚠️  WARNING: {label} height ({pos[2]:.3f}m) is below safe threshold ({SAFE_HEIGHT}m)")
+                print(f"  ⚠️  Please be careful!")
+    else:  # bimanual
+        for label, pos in [("Left Grasp", left_grasp_3d_base), ("Left Place", left_place_3d_base),
+                           ("Right Grasp", right_grasp_3d_base), ("Right Place", right_place_3d_base)]:
+            if pos[2] < SAFE_HEIGHT:
+                print(f"  ⚠️  WARNING: {label} height ({pos[2]:.3f}m) is below safe threshold ({SAFE_HEIGHT}m)")
+                print(f"  ⚠️  Please be careful!")
 
     # ==================== Step 5: Motion Planning ====================
-    print(f"\n[Step 5/5] Executing {ARM_SELECT} arm motion planning...")
-    print(f"           执行{ARM_SELECT}手运动规划...")
+    if CONTROL_MODE == 'single':
+        print(f"\n[Step 5/6] Executing {ARM_SELECT} arm motion planning...")
+        print(f"           执行{ARM_SELECT}手运动规划...")
+    else:
+        print(f"\n[Step 5/6] Executing bimanual motion planning...")
+        print(f"           执行双臂运动规划...")
 
     print("\n" + "="*70)
     print("  ⚠️  SAFETY WARNING")
-    print("  The robot will now move to the target position!")
-    print("  Please ensure:")
-    print("    - Workspace is clear")
-    print("    - Emergency stop is ready")
-    print("    - You are ready to intervene if needed")
+    if CONTROL_MODE == 'single':
+        print("  The robot will move: Grasp -> Lift -> Place -> Release")
+    else:
+        print("  Both robot arms will move: Grasp -> Lift -> Place -> Release")
+    print("  Please ensure workspace is clear!")
     print("="*70)
-
-    confirm = input("\nProceed with motion? (yes/no): ").strip().lower()
-    if confirm == 'no':
-        print("\n[INFO] Motion cancelled by user")
-        return
 
     try:
         # Initialize robot controller
         print("\n[INFO] Initializing robot controller...")
         robot = RealRobotController(camera_sn=CAMERA_SN)
 
-        # Get current arm pose and control object
-        if ARM_SELECT == 'left':
-            current_pose = robot.get_left_arm_pose()
-            active_arm = robot.left_arm
-        else:
-            current_pose = robot.get_right_arm_pose()
-            active_arm = robot.right_arm
-
-        print(f"\n[INFO] Current {ARM_SELECT} arm pose:")
-        print(f"  Position: [{current_pose[0]:.3f}, {current_pose[1]:.3f}, {current_pose[2]:.3f}] m")
-        print(f"  Orientation: [{current_pose[3]:.3f}, {current_pose[4]:.3f}, {current_pose[5]:.3f}] rad")
-
-        # Phase 1: Move to approach position (above target)
-        approach_pos = target_3d_base.copy()
-        approach_pos[2] += APPROACH_OFFSET
-        # approach_pos[0] -= 0.1 这样会向右
-        approach_pos[1] += HAND_OFFSET # 末端执行器转手心，往后
-        approach_pose = np.array([
-            approach_pos[0], approach_pos[1], approach_pos[2],
-            current_pose[3], current_pose[4], current_pose[5]  # Keep current orientation
-        ])
-
-        print(f"\n[Phase 1] Moving to approach position...")
-        print(f"  Target: [{approach_pos[0]:.3f}, {approach_pos[1]:.3f}, {approach_pos[2]:.3f}] m")
-
-        # Calculate steps for safe execution
-        start_pos = current_pose[:3]
-        end_pos = approach_pose[:3]
-        total_dist = np.linalg.norm(end_pos - start_pos)
-        STEP_SIZE = 0.05  # 2 cm per step
-
-        num_steps = int(np.ceil(total_dist / STEP_SIZE))
-        if num_steps < 1: num_steps = 1
-
-        print(f"\n[INFO] BREAKING DOWN MOTION into {num_steps} steps (Step size: ~{STEP_SIZE*100:.1f} cm)")
-        print("  Controls: SPACE/Enter = Next step, 'q' = Quit")
-
-        import time
-
-        for i in range(1, num_steps + 1):
-            # Interpolate
-            ratio = i / num_steps
-            interp_pos = start_pos + (end_pos - start_pos) * ratio
-
-            interp_pose = np.array([
-                interp_pos[0], interp_pos[1], interp_pos[2],
-                current_pose[3], current_pose[4], current_pose[5]
-            ])
-
-            # Wait for user confirmation
-            user_input = input(f"  Step {i}/{num_steps} [{interp_pos[0]:.3f}, {interp_pos[1]:.3f}, {interp_pos[2]:.3f}] > ")
-            if user_input.lower() == 'q':
-                print("[INFO] Motion aborted by user")
-                robot.close()
-                return
-
-            # Execute step
-            active_arm.robot.Clear_System_Err()
-            active_arm.move_pose_Cmd(interp_pose.tolist(), MOVE_SPEED)
-
-            # Brief pause to let command send and maybe start
-            time.sleep(0.1)
-
-        print(f"  ✓ Reached approach position (Target)")
-
-        # ==================== Step 6: Hand Action ====================
-        print(f"\n[Step 6/6] Hand Action")
-        print(f"           执行手部动作 ({ARM_SELECT} hand)...")
+        # Execute Pick and Place sequence
+        from motion_primitives import mp_right_fold, mp_left_fold, mp_bimanual_fold
         
-        confirm_hand = input(f"\nPress ENTER to close {ARM_SELECT} hand (or 's' to skip): ").strip().lower()
-        if confirm_hand != 's':
-            print(f"  Closing {ARM_SELECT} hand...")
-            if ARM_SELECT == 'left':
-                robot.close_left_hand()
+        if CONTROL_MODE == 'single':
+            if ARM_SELECT == 'right':
+                success = mp_right_fold(
+                    robot_controller=robot,
+                    grasp_pos=grasp_3d_base,
+                    place_pos=place_3d_base,
+                    lift_height=LIFT_HEIGHT,
+                    reset_joints=None  # Will use default from load_home_config
+                )
             else:
-                robot.close_right_hand()
-            print(f"  ✓ {ARM_SELECT} hand closed")
+                success = mp_left_fold(
+                    robot_controller=robot,
+                    grasp_pos=grasp_3d_base,
+                    place_pos=place_3d_base,
+                    lift_height=LIFT_HEIGHT,
+                    reset_joints=None
+                )
+        else:  # bimanual
+            success = mp_bimanual_fold(
+                robot_controller=robot,
+                left_grasp_pos=left_grasp_3d_base,
+                right_grasp_pos=right_grasp_3d_base,
+                left_place_pos=left_place_3d_base,
+                right_place_pos=right_place_3d_base,
+                lift_height=LIFT_HEIGHT
+            )
+        
+        if success:
+            print("\n[SUCCESS] Pipeline completed successfully!")
         else:
-            print("  [INFO] Hand action skipped")
-
-        print("\n[INFO] Stopping here as requested (Safety).")
-        print("  ✓ Motion planning test completed successfully!")
-        print("  ✓ 运动规划测试成功完成!")
-        print("="*70)
+            print("\n[FAILED] Pipeline stopped or failed.")
 
         # Cleanup
         robot.close()
