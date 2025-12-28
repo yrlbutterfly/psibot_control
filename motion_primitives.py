@@ -9,6 +9,7 @@ import numpy as np
 import time
 import sys
 from reset_robot_safe import reset_arm, load_home_config
+from scipy.spatial.transform import Rotation as R
 
 def robust_input(prompt=""):
     """
@@ -28,6 +29,64 @@ def robust_input(prompt=""):
         except EOFError:
             raise EOFError("Cannot read input (EOF). Please run in interactive terminal.")
 
+def euler_to_quaternion(roll, pitch, yaw):
+    """
+    Convert Euler angles (RPY) to quaternion [w, x, y, z]
+    
+    Args:
+        roll, pitch, yaw: Rotation angles in radians
+        
+    Returns:
+        quaternion [w, x, y, z]
+    """
+    rot = R.from_euler('xyz', [roll, pitch, yaw])
+    quat = rot.as_quat()  # Returns [x, y, z, w]
+    return np.array([quat[3], quat[0], quat[1], quat[2]])  # Convert to [w, x, y, z]
+
+def quaternion_to_euler(quat):
+    """
+    Convert quaternion [w, x, y, z] to Euler angles (RPY)
+    
+    Args:
+        quat: quaternion [w, x, y, z]
+        
+    Returns:
+        [roll, pitch, yaw] in radians
+    """
+    # scipy expects [x, y, z, w]
+    rot = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
+    return rot.as_euler('xyz')
+
+def quaternion_slerp(q1, q2, t):
+    """
+    Spherical linear interpolation between two quaternions
+    
+    Args:
+        q1: Starting quaternion [w, x, y, z]
+        q2: Ending quaternion [w, x, y, z]
+        t: Interpolation parameter (0 to 1)
+        
+    Returns:
+        Interpolated quaternion [w, x, y, z]
+    """
+    from scipy.spatial.transform import Slerp
+    
+    # Convert to scipy format [x, y, z, w]
+    q1_scipy = [q1[1], q1[2], q1[3], q1[0]]
+    q2_scipy = [q2[1], q2[2], q2[3], q2[0]]
+    
+    # Create key rotations and times for Slerp
+    key_rots = R.from_quat([q1_scipy, q2_scipy])
+    key_times = [0, 1]
+    
+    # Perform spherical linear interpolation
+    slerp_interp = Slerp(key_times, key_rots)
+    result_rot = slerp_interp([t])[0]
+    
+    # Convert back to [w, x, y, z] format
+    result_quat = result_rot.as_quat()  # [x, y, z, w]
+    return np.array([result_quat[3], result_quat[0], result_quat[1], result_quat[2]])  # [w, x, y, z]
+
 def rotation_matrix_from_euler(roll, pitch, yaw):
     """
     Create rotation matrix from Euler angles (RPY convention)
@@ -38,30 +97,8 @@ def rotation_matrix_from_euler(roll, pitch, yaw):
     Returns:
         3x3 rotation matrix
     """
-    # Rotation around X-axis (Roll)
-    R_x = np.array([
-        [1, 0, 0],
-        [0, np.cos(roll), -np.sin(roll)],
-        [0, np.sin(roll), np.cos(roll)]
-    ])
-    
-    # Rotation around Y-axis (Pitch)
-    R_y = np.array([
-        [np.cos(pitch), 0, np.sin(pitch)],
-        [0, 1, 0],
-        [-np.sin(pitch), 0, np.cos(pitch)]
-    ])
-    
-    # Rotation around Z-axis (Yaw)
-    R_z = np.array([
-        [np.cos(yaw), -np.sin(yaw), 0],
-        [np.sin(yaw), np.cos(yaw), 0],
-        [0, 0, 1]
-    ])
-    
-    # Combined rotation: R = R_z * R_y * R_x
-    R = R_z @ R_y @ R_x
-    return R
+    rot = R.from_euler('xyz', [roll, pitch, yaw])
+    return rot.as_matrix()
 
 def apply_hand_offset(position, orientation, offset_magnitude, direction='y'):
     """
@@ -119,14 +156,18 @@ class MotionPlanner:
     def execute_stepwise_motion(self, active_arm, target_pose, label="Motion"):
         """
         Execute motion in small steps with user confirmation
+        Uses quaternion SLERP for smooth orientation interpolation
         """
         current_pose = active_arm.get_current_pose()
         start_pos = np.array(current_pose[:3])
         end_pos = np.array(target_pose[:3])
         
-        # Get both start and target orientation for interpolation
-        start_ori = np.array(current_pose[3:])
-        target_ori = np.array(target_pose[3:])
+        # Convert Euler angles to quaternions for interpolation
+        start_euler = np.array(current_pose[3:])
+        target_euler = np.array(target_pose[3:])
+        
+        start_quat = euler_to_quaternion(start_euler[0], start_euler[1], start_euler[2])
+        target_quat = euler_to_quaternion(target_euler[0], target_euler[1], target_euler[2])
         
         dist = np.linalg.norm(end_pos - start_pos)
         
@@ -143,11 +184,15 @@ class MotionPlanner:
         
         for i in range(1, num_steps + 1):
             ratio = i / num_steps
-            # Interpolate both position and orientation
-            interp_pos = start_pos + (end_pos - start_pos) * ratio
-            interp_ori = start_ori + (target_ori - start_ori) * ratio  # Linear interpolation for Euler angles
             
-            interp_pose = np.concatenate([interp_pos, interp_ori])
+            # Interpolate position linearly
+            interp_pos = start_pos + (end_pos - start_pos) * ratio
+            
+            # Interpolate orientation using quaternion SLERP
+            interp_quat = quaternion_slerp(start_quat, target_quat, ratio)
+            interp_euler = quaternion_to_euler(interp_quat)
+            
+            interp_pose = np.concatenate([interp_pos, interp_euler])
             
             # Always prompt for user confirmation
             try:
@@ -252,7 +297,7 @@ class MotionPlanner:
 
             current_pose = active_arm.get_current_pose()
             lift_target = np.array(current_pose)
-            lift_target[2] = -0.05
+            lift_target[2] = self.FINAL_DROP_HEIGHT
             
             if not self.execute_stepwise_motion(active_arm, lift_target, label="Phase 3 (Lift)"): return False
 
@@ -587,6 +632,7 @@ def _execute_bimanual_stepwise_motion(left_arm, right_arm, left_target_pose, rig
     """
     Execute bimanual stepwise motion with user confirmation at each step
     Both arms move simultaneously in small steps
+    Uses quaternion SLERP for smooth orientation interpolation
     
     Args:
         left_arm: Left ArmControl instance
@@ -610,8 +656,16 @@ def _execute_bimanual_stepwise_motion(left_arm, right_arm, left_target_pose, rig
     left_end_pos = np.array(left_target_pose[:3])
     right_end_pos = np.array(right_target_pose[:3])
     
-    left_ori = np.array(left_target_pose[3:])
-    right_ori = np.array(right_target_pose[3:])
+    # Convert orientations to quaternions
+    left_start_euler = np.array(left_current[3:])
+    right_start_euler = np.array(right_current[3:])
+    left_target_euler = np.array(left_target_pose[3:])
+    right_target_euler = np.array(right_target_pose[3:])
+    
+    left_start_quat = euler_to_quaternion(left_start_euler[0], left_start_euler[1], left_start_euler[2])
+    right_start_quat = euler_to_quaternion(right_start_euler[0], right_start_euler[1], right_start_euler[2])
+    left_target_quat = euler_to_quaternion(left_target_euler[0], left_target_euler[1], left_target_euler[2])
+    right_target_quat = euler_to_quaternion(right_target_euler[0], right_target_euler[1], right_target_euler[2])
     
     # Calculate distances
     left_dist = np.linalg.norm(left_end_pos - left_start_pos)
@@ -634,12 +688,19 @@ def _execute_bimanual_stepwise_motion(left_arm, right_arm, left_target_pose, rig
     for i in range(1, num_steps + 1):
         ratio = i / num_steps
         
-        # Calculate interpolated positions for both arms
+        # Interpolate positions linearly
         left_interp_pos = left_start_pos + (left_end_pos - left_start_pos) * ratio
         right_interp_pos = right_start_pos + (right_end_pos - right_start_pos) * ratio
         
-        left_interp_pose = np.concatenate([left_interp_pos, left_ori])
-        right_interp_pose = np.concatenate([right_interp_pos, right_ori])
+        # Interpolate orientations using quaternion SLERP
+        left_interp_quat = quaternion_slerp(left_start_quat, left_target_quat, ratio)
+        right_interp_quat = quaternion_slerp(right_start_quat, right_target_quat, ratio)
+        
+        left_interp_euler = quaternion_to_euler(left_interp_quat)
+        right_interp_euler = quaternion_to_euler(right_interp_quat)
+        
+        left_interp_pose = np.concatenate([left_interp_pos, left_interp_euler])
+        right_interp_pose = np.concatenate([right_interp_pos, right_interp_euler])
         
         # User confirmation
         try:
