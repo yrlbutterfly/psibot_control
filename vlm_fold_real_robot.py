@@ -615,8 +615,8 @@ def main():
             print(f"\n[Step 2/{6}] Capturing image...")
             
             # 初始化相机并拍照
-            from robot_libs.realsense_image_module import Image as RealsenseCamera
-            camera = RealsenseCamera(serial_number=CAMERA_SN)
+            from robot_libs.realsense_image_module import RealSenseImage
+            camera = RealSenseImage(SN_number=CAMERA_SN)
             color_img, depth_img = camera.capture_frame()
             img_height, img_width = color_img.shape[:2]
             print(f"  ✓ Captured image: {img_width}x{img_height}")
