@@ -330,7 +330,7 @@ class MotionPlanner:
             #target_z = max(lift_target[2], target_place[2] + lift_height)
             
             place_pose_high = np.array([
-                target_place[0], target_place[1], self.FINAL_DROP_HEIGHT,
+                target_place[0], target_place[1], self.FINAL_DROP_HEIGHT+0.05,
                 orientation[0], orientation[1], orientation[2]
             ])
 
@@ -420,7 +420,16 @@ def mp_bimanual_fold(robot_controller, left_grasp_pos, right_grasp_pos,
         # Configuration constants
         HAND_OFFSET = 0.12  # End-effector to palm center offset
         SMALL_LIFT_HEIGHT = 0.02  # 2cm - just enough to clear surface after grasp
-        FINAL_DROP_HEIGHT = 0.02  # 10cm - height above target position to drop from
+        FINAL_DROP_HEIGHT = 0.07  # 10cm - height above target position to drop from
+        
+        # Custom orientations for different phases (roll, pitch, yaw in radians)
+        # Phase 1: Grasp orientations
+        LEFT_GRASP_ORIENTATION = [1.119000, -1.545000, 2.949000]   # 左手抓取姿态
+        RIGHT_GRASP_ORIENTATION = [2.040000, -1.547000, 0.104000]  # 右手抓取姿态
+        
+        # Phase 4: Place orientations  
+        LEFT_PLACE_ORIENTATION = [-0.291000, -1.554000, -1.568000]   # 左手放置姿态 (示例值,可后续调整)
+        RIGHT_PLACE_ORIENTATION = [2.524000, -1.543000, -0.620000]  # 右手放置姿态 (示例值,可后续调整)
         
         # ---------------------------------------------------------
         # Phase 1: 双手移动到起始点 (Grasp positions)
@@ -429,18 +438,25 @@ def mp_bimanual_fold(robot_controller, left_grasp_pos, right_grasp_pos,
         
         # Prepare grasp poses with offsets
         left_grasp = np.array(left_grasp_pos)
-        left_grasp[1] -= HAND_OFFSET  # Left hand offset
+        left_grasp[1] -= 0.08
+        left_grasp[0] -= 0.03  # Left hand offset
         left_grasp[2] = -0.105 + 0.03  # Left hand Z height
         
         right_grasp = np.array(right_grasp_pos)
-        right_grasp[1] += HAND_OFFSET  # Right hand offset
+        right_grasp[1] += 0.08  # Right hand offset
+        right_grasp[0] -= 0.07  # Right hand X offset
+
         right_grasp[2] = -0.105 + 0.03  # Right hand Z height
         
-        left_grasp_pose = np.concatenate([left_grasp, left_current[3:]])
-        right_grasp_pose = np.concatenate([right_grasp, right_current[3:]])
+
+        # Use custom grasp orientations instead of keeping current
+        left_grasp_pose = np.concatenate([left_grasp, LEFT_GRASP_ORIENTATION])
+        right_grasp_pose = np.concatenate([right_grasp, RIGHT_GRASP_ORIENTATION])
         
         print(f"  → Left target: [{left_grasp[0]:.3f}, {left_grasp[1]:.3f}, {left_grasp[2]:.3f}]")
+        print(f"  → Left orientation: [{LEFT_GRASP_ORIENTATION[0]:.3f}, {LEFT_GRASP_ORIENTATION[1]:.3f}, {LEFT_GRASP_ORIENTATION[2]:.3f}]")
         print(f"  → Right target: [{right_grasp[0]:.3f}, {right_grasp[1]:.3f}, {right_grasp[2]:.3f}]")
+        print(f"  → Right orientation: [{RIGHT_GRASP_ORIENTATION[0]:.3f}, {RIGHT_GRASP_ORIENTATION[1]:.3f}, {RIGHT_GRASP_ORIENTATION[2]:.3f}]")
         
         # Use stepwise motion for safety
         if not _execute_bimanual_stepwise_motion(
@@ -507,20 +523,25 @@ def mp_bimanual_fold(robot_controller, left_grasp_pos, right_grasp_pos,
         
         # Prepare place poses with offsets
         left_place = np.array(left_place_pos)
-        left_place[1] -= HAND_OFFSET + 0.1  # Slight overshoot for folding
+        left_place[1] -= 0.12  # Slight overshoot for folding
+        left_place[0] -= 0.02
         # Set final height: target Z + 10cm for dropping
         left_place[2] = FINAL_DROP_HEIGHT  # 10cm above target
         
         right_place = np.array(right_place_pos)
-        right_place[1] += HAND_OFFSET + 0.1  # Slight overshoot for folding
+        right_place[1] += 0.12  # Slight overshoot for folding
+        right_place[0] -= 0.02
         right_place[2] = FINAL_DROP_HEIGHT  # 10cm above target
         
-        left_place_pose = np.concatenate([left_place, left_current[3:]])
-        right_place_pose = np.concatenate([right_place, right_current[3:]])
+        # Use custom place orientations instead of keeping current
+        left_place_pose = np.concatenate([left_place, LEFT_PLACE_ORIENTATION])
+        right_place_pose = np.concatenate([right_place, RIGHT_PLACE_ORIENTATION])
         
         print(f"  → Final drop height: {FINAL_DROP_HEIGHT*100:.0f}cm above target")
         print(f"  → Left target: [{left_place[0]:.3f}, {left_place[1]:.3f}, {left_place[2]:.3f}]")
+        print(f"  → Left orientation: [{LEFT_PLACE_ORIENTATION[0]:.3f}, {LEFT_PLACE_ORIENTATION[1]:.3f}, {LEFT_PLACE_ORIENTATION[2]:.3f}]")
         print(f"  → Right target: [{right_place[0]:.3f}, {right_place[1]:.3f}, {right_place[2]:.3f}]")
+        print(f"  → Right orientation: [{RIGHT_PLACE_ORIENTATION[0]:.3f}, {RIGHT_PLACE_ORIENTATION[1]:.3f}, {RIGHT_PLACE_ORIENTATION[2]:.3f}]")
         print(f"  → Will move horizontally while gradually lifting")
         
         # Use stepwise motion for safety (moving and lifting simultaneously)
@@ -725,8 +746,8 @@ def _execute_bimanual_stepwise_motion(left_arm, right_arm, left_target_pose, rig
         right_arm.move_pose_Cmd(right_interp_pose.tolist(), speed, block=False)
         
         # Wait for both arms to reach positions
-        _wait_for_position_reached(left_arm, left_interp_pose, tolerance=0.015, timeout=20.0)
-        _wait_for_position_reached(right_arm, right_interp_pose, tolerance=0.015, timeout=20.0)
+        # _wait_for_position_reached(left_arm, left_interp_pose, tolerance=0.015, timeout=20.0)
+        # _wait_for_position_reached(right_arm, right_interp_pose, tolerance=0.015, timeout=20.0)
     
     print(f"  ✓ {label} Completed")
     return True

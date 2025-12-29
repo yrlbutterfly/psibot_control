@@ -38,3 +38,4 @@ image.png
 *.log
 sam2_repo/
 sam2.1_hiera_large.pt
+checkpoint-900/

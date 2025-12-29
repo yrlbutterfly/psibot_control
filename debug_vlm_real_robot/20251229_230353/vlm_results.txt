@@ -1,0 +1,2 @@
+step 0: {"plan": [{"left": {"from": "left_cuff", "to": "right_shoulder"}, "right": {"from": null, "to": null}}], "points": [{"label": "left_cuff", "bbox": [43, 278, 55, 290]}, {"label": "right_shoulder", "bbox": [376, 171, 389, 183]}]}
+step 1: {"plan": [{"left": {"from": null, "to": null}, "right": {"from": "right_cuff", "to": "left_shoulder"}}], "points": [{"label": "right_cuff", "bbox": [583, 287, 595, 299]}, {"label": "left_shoulder", "bbox": [217, 180, 229, 192]}]}

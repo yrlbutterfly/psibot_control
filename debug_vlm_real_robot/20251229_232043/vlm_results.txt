@@ -1,0 +1,1 @@
+step 0: {"plan": [{"left": {"from": null, "to": null}, "right": {"from": "right_cuff", "to": "left_shoulder"}}], "points": [{"label": "right_cuff", "bbox": [580, 285, 592, 297]}, {"label": "left_shoulder", "bbox": [217, 179, 229, 191]}]}

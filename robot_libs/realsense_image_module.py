@@ -349,7 +349,11 @@ class RealSenseImage:
 
     def close(self):
         self.pipeline.stop()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            # Ignore error if OpenCV has no GUI support
+            pass
 
 if __name__ == "__main__":
     image_processor = Image()
