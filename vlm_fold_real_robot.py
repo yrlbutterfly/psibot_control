@@ -24,10 +24,14 @@ import base64
 import re
 from typing import Dict, List, Tuple, Optional
 from openai import OpenAI
+from scipy.spatial.transform import Rotation as R
 
 # Import custom modules
 from real_robot_controller import RealRobotController
-from motion_primitives import mp_right_fold, mp_left_fold, mp_bimanual_fold
+from motion_primitives import (
+    mp_right_fold, mp_left_fold, mp_bimanual_fold,
+    euler_to_quaternion, quaternion_to_euler, quaternion_slerp
+)
 
 # ==================== VLM Prompt Definition ====================
 VLM_FOLD_PROMPT = (
@@ -504,12 +508,161 @@ def execute_vlm_motion_plan(
 
 # ==================== Robot Position Management ====================
 
+def execute_stepwise_joint_motion(arm, target_joints, label="Motion", step_size=0.05, speed=5):
+    """
+    Execute joint motion in small Cartesian steps with user confirmation
+    
+    Args:
+        arm: ArmControl instance
+        target_joints: Target joint angles [j1, j2, ..., j7]
+        label: Description of the motion
+        step_size: Step size in meters for Cartesian interpolation
+        speed: Movement speed (0-100)
+        
+    Returns:
+        bool: True if successful, False if cancelled
+    """
+    print(f"\n  [STEPWISE JOINT MOTION] {label}")
+    print(f"    Target joints: {[f'{j:.3f}' for j in target_joints]}")
+    
+    # Get current and target poses in Cartesian space
+    current_pose = arm.get_current_pose()
+    start_pos = np.array(current_pose[:3])
+    start_euler = np.array(current_pose[3:])
+    
+    # Get target pose by forward kinematics (approximate by moving and reading)
+    # Since we don't have FK directly, we'll use joint interpolation
+    current_joints = arm.get_current_joint()
+    
+    # Calculate distance in joint space
+    joint_diff = np.array(target_joints) - np.array(current_joints)
+    joint_dist = np.linalg.norm(joint_diff)
+    
+    print(f"    Joint space distance: {joint_dist:.3f} rad")
+    
+    # Interpolate in joint space
+    num_steps = max(5, int(np.ceil(joint_dist / 0.3)))  # ~0.3 rad per step
+    
+    print(f"    Steps: {num_steps} | Controls: ENTER = Next step, 'q' = Quit")
+    
+    for i in range(1, num_steps + 1):
+        ratio = i / num_steps
+        
+        # Interpolate joint angles
+        interp_joints = np.array(current_joints) + joint_diff * ratio
+        
+        # Get current position for display
+        curr_display_pose = arm.get_current_pose()
+        
+        # Prompt user
+        try:
+            user_input = robust_input_main(
+                f"    Step {i}/{num_steps} [Current: {curr_display_pose[0]:.3f}, {curr_display_pose[1]:.3f}, {curr_display_pose[2]:.3f}] > "
+            ).strip().lower()
+            if user_input == 'q':
+                print("  [INFO] Motion cancelled by user")
+                return False
+        except EOFError as e:
+            print(f"\n  [ERROR] {e}")
+            return False
+        
+        # Execute step
+        arm.robot.Clear_System_Err()
+        arm.move_joint(interp_joints.tolist(), speed=speed, block=True)
+        time.sleep(0.3)
+    
+    print(f"  ✓ {label} Completed")
+    return True
+
+
+def execute_stepwise_pose_motion(arm, target_pose, label="Motion", step_size=0.05, speed=5):
+    """
+    Execute pose motion in small Cartesian steps with user confirmation
+    Uses quaternion SLERP for smooth orientation interpolation
+    
+    Args:
+        arm: ArmControl instance
+        target_pose: Target pose [x, y, z, roll, pitch, yaw]
+        label: Description of the motion
+        step_size: Step size in meters
+        speed: Movement speed (0-100)
+        
+    Returns:
+        bool: True if successful, False if cancelled
+    """
+    current_pose = arm.get_current_pose()
+    start_pos = np.array(current_pose[:3])
+    end_pos = np.array(target_pose[:3])
+    
+    # Convert Euler angles to quaternions for interpolation
+    start_euler = np.array(current_pose[3:])
+    target_euler = np.array(target_pose[3:])
+    
+    start_quat = euler_to_quaternion(start_euler[0], start_euler[1], start_euler[2])
+    target_quat = euler_to_quaternion(target_euler[0], target_euler[1], target_euler[2])
+    
+    dist = np.linalg.norm(end_pos - start_pos)
+    
+    if dist < 0.001:
+        print(f"  [INFO] Already at target ({label})")
+        return True
+    
+    num_steps = int(np.ceil(dist / step_size))
+    if num_steps < 1:
+        num_steps = 1
+    
+    print(f"\n  [STEPWISE POSE MOTION] {label}")
+    print(f"    Distance: {dist:.3f}m | Steps: {num_steps} | Step size: ~{step_size*100:.1f}cm")
+    print(f"    Controls: ENTER = Next step, 'q' = Quit")
+    
+    for i in range(1, num_steps + 1):
+        ratio = i / num_steps
+        
+        # Interpolate position linearly
+        interp_pos = start_pos + (end_pos - start_pos) * ratio
+        
+        # Interpolate orientation using quaternion SLERP
+        interp_quat = quaternion_slerp(start_quat, target_quat, ratio)
+        interp_euler = quaternion_to_euler(interp_quat)
+        
+        interp_pose = np.concatenate([interp_pos, interp_euler])
+        
+        # Prompt user
+        try:
+            user_input = robust_input_main(
+                f"    Step {i}/{num_steps} [{interp_pos[0]:.3f}, {interp_pos[1]:.3f}, {interp_pos[2]:.3f}] > "
+            ).strip().lower()
+            if user_input == 'q':
+                print("  [INFO] Motion cancelled by user")
+                return False
+        except EOFError as e:
+            print(f"\n  [ERROR] {e}")
+            return False
+        
+        # Execute step
+        arm.robot.Clear_System_Err()
+        arm.move_pose_Cmd(interp_pose.tolist(), speed)
+        time.sleep(0.5)
+    
+    print(f"  ✓ {label} Completed")
+    return True
+
+
 def move_to_preset(config_file, pose_name):
-    """移动机器人到预设位置"""
+    """
+    移动机器人到预设位置（带安全检查）
+    - 检查当前z轴高度，如果低于安全阈值先分步抬高
+    - 抬高后直接移动到目标位置（不需要分步）
+    """
     print(f"\n[Robot Control] Moving robot to {pose_name} position...")
     if not os.path.exists(config_file):
         print(f"  [SKIP] Config file {config_file} not found.")
         return
+    
+    SAFETY_Z_THRESHOLD = -0.135  # 安全z轴阈值（米）
+    SAFETY_Z_LIFT = -0.05        # 安全抬升高度（米）
+    STEP_SIZE = 0.05             # 分步执行步长（米）- 仅用于安全抬升
+    MOVE_SPEED = 5               # 移动速度
     
     try:
         with open(config_file, 'r') as f:
@@ -518,19 +671,80 @@ def move_to_preset(config_file, pose_name):
         # Initialize temp controller
         tmp_robot = RealRobotController()
         
+        # ---- Left Arm Safety Check & Movement ----
         if 'left' in config:
-            print(f"  Moving Left Arm to {pose_name}...")
-            tmp_robot.left_arm.move_joint(config['left'], speed=6, block=True)
-        
-        if 'right' in config:
-            print(f"  Moving Right Arm to {pose_name}...")
-            tmp_robot.right_arm.move_joint(config['right'], speed=6, block=True)
+            print(f"\n  [Left Arm] Checking current position...")
+            left_pose = tmp_robot.get_left_arm_pose()
+            current_z = left_pose[2]
+            print(f"    Current Z: {current_z:.4f} m")
             
+            # Safety check: if z is too low, lift first (with stepwise motion)
+            if current_z < SAFETY_Z_THRESHOLD:
+                print(f"    ⚠️  Z < {SAFETY_Z_THRESHOLD}m detected! Lifting to safe height first...")
+                safe_pose = left_pose.copy()
+                safe_pose[2] = SAFETY_Z_LIFT
+                
+                success = execute_stepwise_pose_motion(
+                    tmp_robot.left_arm,
+                    safe_pose,
+                    label=f"Left Arm Safety Lift",
+                    step_size=STEP_SIZE,
+                    speed=MOVE_SPEED
+                )
+                
+                if not success:
+                    print(f"    [CANCELLED] Left arm safety lift cancelled")
+                    tmp_robot.close()
+                    return
+                
+                print(f"    ✓ Lifted to safe height: {SAFETY_Z_LIFT}m")
+            
+            # Move to target position directly (no stepwise needed after safety check)
+            print(f"  [Left Arm] Moving to {pose_name}...")
+            tmp_robot.left_arm.move_joint(config['left'], speed=6, block=True)
+            print(f"    ✓ Left arm reached {pose_name}")
+        
+        # ---- Right Arm Safety Check & Movement ----
+        if 'right' in config:
+            print(f"\n  [Right Arm] Checking current position...")
+            right_pose = tmp_robot.get_right_arm_pose()
+            current_z = right_pose[2]
+            print(f"    Current Z: {current_z:.4f} m")
+            
+            # Safety check: if z is too low, lift first (with stepwise motion)
+            if current_z < SAFETY_Z_THRESHOLD:
+                print(f"    ⚠️  Z < {SAFETY_Z_THRESHOLD}m detected! Lifting to safe height first...")
+                safe_pose = right_pose.copy()
+                safe_pose[2] = SAFETY_Z_LIFT
+                
+                success = execute_stepwise_pose_motion(
+                    tmp_robot.right_arm,
+                    safe_pose,
+                    label=f"Right Arm Safety Lift",
+                    step_size=STEP_SIZE,
+                    speed=MOVE_SPEED
+                )
+                
+                if not success:
+                    print(f"    [CANCELLED] Right arm safety lift cancelled")
+                    tmp_robot.close()
+                    return
+                
+                print(f"    ✓ Lifted to safe height: {SAFETY_Z_LIFT}m")
+            
+            # Move to target position directly (no stepwise needed after safety check)
+            print(f"  [Right Arm] Moving to {pose_name}...")
+            tmp_robot.right_arm.move_joint(config['right'], speed=6, block=True)
+            print(f"    ✓ Right arm reached {pose_name}")
+        
         tmp_robot.close()
-        print(f"  ✓ Robot at {pose_name}")
+        print(f"\n  ✓ Robot safely moved to {pose_name}")
         
     except Exception as e:
-        print(f"  [WARNING] Failed to move to {pose_name}: {e}")
+        print(f"  [ERROR] Failed to move to {pose_name}: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 
 def robust_input_main(prompt=""):
@@ -561,7 +775,7 @@ def main():
     
     # VLM Configuration
     VLM_BASE_URL = os.environ.get("VLM_BASE_URL", "http://localhost:8001/v1")
-    VLM_MODEL_NAME = os.environ.get("VLM_MODEL_NAME", "/home/psibot/Documents/psibot_control/checkpoint-900")
+    VLM_MODEL_NAME = os.environ.get("VLM_MODEL_NAME", "/share_data/yanruilin/qwen3vl_full_sft_cloth_4")
     
     # Debug Configuration
     DEBUG_FLAG = True
